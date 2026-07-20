@@ -1,0 +1,20 @@
+[Unit]
+Description=VB intern Frontend (Prod)
+
+[Container]
+ContainerName=vb-intern-prod
+Pod=vb-intern-prod.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-intern:latest
+AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-intern-prod.env
+
+HealthCmd=wget -qO- http://127.0.0.1/ || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=60

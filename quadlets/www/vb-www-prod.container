@@ -1,0 +1,19 @@
+[Unit]
+Description=VB www Public Site (Prod)
+
+[Container]
+ContainerName=vb-www-prod
+Pod=vb-www-prod.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
+AutoUpdate=registry
+
+HealthCmd=wget -qO- http://127.0.0.1/ || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=60

@@ -1,0 +1,21 @@
+[Unit]
+Description=VB API Backend (Prod)
+After=vb-api-pg-prod.service
+
+[Container]
+ContainerName=vb-api-prod
+Pod=vb-api-prod.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
+AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-api-prod.env
+
+HealthCmd=python3 -c 'import urllib.request; urllib.request.urlopen("http://localhost:8000/")'
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120

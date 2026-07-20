@@ -1,0 +1,10 @@
+[Unit]
+Wants=vb-www-prod.service
+Before=vb-www-prod.service
+
+[Pod]
+PodName=vb-www-prod-pod
+PublishPort=127.0.0.1:21002:80
+
+[Install]
+WantedBy=default.target

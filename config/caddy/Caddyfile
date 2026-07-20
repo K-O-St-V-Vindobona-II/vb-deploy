@@ -1,0 +1,31 @@
+{
+	email vindobona2.webaccess@gmail.com
+	# Deaktiviert HTTP/3 (QUIC) und nutzt nur TCP-basierte Protokolle
+	servers {
+		protocols h1 h2
+	}
+}
+
+intern.vindobona2.at {
+	basic_auth /logging* {
+		{$LOGGING_USER} {$LOGGING_PASSWORD_HASH}
+	}
+	handle /logging/dozzle* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	reverse_proxy 127.0.0.1:21001 {
+		header_down -Server
+	}
+}
+
+api.vindobona2.at {
+	reverse_proxy 127.0.0.1:21000 {
+		header_down -Server
+	}
+}
+
+www.vindobona2.at {
+	reverse_proxy 127.0.0.1:21002 {
+		header_down -Server
+	}
+}

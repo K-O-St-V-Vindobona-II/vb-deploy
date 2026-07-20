@@ -1,0 +1,211 @@
+---
+# Laufender Betrieb: Secrets, Caddyfile und Quadlets auf dem P-System
+# synchron halten + Dienste (neu) starten. Baut KEINE Images, klont KEINE
+# App-Repos, restored KEINE Daten - das ist alles nicht mehr Aufgabe dieses
+# Playbooks (siehe Plan "Ansible/Deployment neu aufgesetzt" fuer die
+# Begruendung: die drei App-Images kommen bereits fertig gebaut aus ghcr.io
+# und werden vom bereits aktiven podman-auto-update.timer automatisch
+# eingespielt).
+#
+# Aufruf: ansible-playbook -i inventory/hosts.ini playbooks/deploy.yml --ask-vault-pass
+#
+# Sofort-Deploy statt auf den naechtlichen Auto-Update-Lauf zu warten:
+#   ansible-playbook ... --ask-vault-pass --tags deploy-api
+#   ansible-playbook ... --ask-vault-pass --tags deploy-intern
+#   ansible-playbook ... --ask-vault-pass --tags deploy-www
+# (diese Tasks laufen NUR, wenn der jeweilige Tag explizit angegeben wird)
+
+- name: Deploy/Sync auf dem P-System
+  hosts: vps
+  remote_user: service
+  gather_facts: yes
+  vars:
+    local_secrets_path: "../secrets"
+    local_quadlets_path: "../quadlets"
+    local_timers_path: "../systemd-timers"
+    local_caddyfile: "../config/caddy/Caddyfile"
+
+    remote_env_dir: "{{ ansible_user_dir }}/.env"
+    remote_quadlet_base: "{{ ansible_user_dir }}/.config/containers/systemd"
+    remote_systemd_user_dir: "{{ ansible_user_dir }}/.config/systemd/user"
+    remote_caddy_config_dir: "{{ ansible_user_dir }}/.config/vb/infrastructure/caddy"
+    xdg_runtime_dir: "/run/user/{{ ansible_facts.user_uid }}"
+
+    # Quadlet-Quellordner -> Zielpfad unter remote_quadlet_base.
+    # Zwei gewachsene, bewusst beibehaltene Konventionen: "vb/<name>" fuer
+    # Caddy/Maintenance/Logging, "vindobona2.at/<name>" fuer die drei Apps.
+    quadlet_targets:
+      - { src: caddy, dest: "vb/infrastructure/caddy" }
+      - { src: maintenance, dest: "vb/infrastructure/maintenance" }
+      - { src: logging, dest: "vb/logging" }
+      - { src: api, dest: "vindobona2.at/api" }
+      - { src: intern, dest: "vindobona2.at/intern" }
+      - { src: www, dest: "vindobona2.at/www" }
+
+    # Primaere Units, die nach Sync (neu) aktiviert/gestartet werden.
+    # Quadlet-generierte Abhaengigkeiten (Pod, Postgres) werden ueber die
+    # Wants=/After=-Zeilen der jeweiligen .pod/.container-Dateien automatisch
+    # mitgezogen.
+    managed_units:
+      - caddy.service
+      - logging-dozzle.service
+      - vb-api-prod.service
+      - vb-intern-prod.service
+      - vb-www-prod.service
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 1. Verzeichnisse sicherstellen
+    # ------------------------------------------------------------------
+    - name: Verzeichnisstruktur anlegen
+      loop:
+        - "{{ remote_env_dir }}"
+        - "{{ remote_quadlet_base }}"
+        - "{{ remote_systemd_user_dir }}"
+        - "{{ remote_caddy_config_dir }}"
+        - "{{ ansible_user_dir }}/.local/share/caddy/caddy_data"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+
+    # ------------------------------------------------------------------
+    # 2. Secrets verteilen (ansible-vault-verschluesselt im Repo,
+    #    Ansible entschluesselt transparent beim Kopieren)
+    # ------------------------------------------------------------------
+    - name: "*.env aus secrets/ finden"
+      delegate_to: localhost
+      become: no
+      ansible.builtin.find:
+        paths: "{{ local_secrets_path }}"
+        patterns: "*.env"
+      register: secret_files
+
+    - name: Secrets nach ~/.env kopieren
+      no_log: true
+      loop: "{{ secret_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ remote_env_dir }}/{{ item.path | basename }}"
+        mode: "0600"
+
+    # ------------------------------------------------------------------
+    # 3. Caddyfile synchronisieren
+    # ------------------------------------------------------------------
+    - name: Caddyfile kopieren
+      ansible.builtin.copy:
+        src: "{{ local_caddyfile }}"
+        dest: "{{ remote_caddy_config_dir }}/Caddyfile"
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 4. Quadlets synchronisieren
+    # ------------------------------------------------------------------
+    - name: Quadlet-Verzeichnisse anlegen
+      loop: "{{ quadlet_targets }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      ansible.builtin.file:
+        path: "{{ remote_quadlet_base }}/{{ item.dest }}"
+        state: directory
+        mode: "0755"
+
+    - name: Quadlet-Dateien kopieren
+      loop: "{{ quadlet_targets }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      ansible.builtin.copy:
+        src: "{{ local_quadlets_path }}/{{ item.src }}/"
+        dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
+        mode: "0644"
+
+    - name: Systemd-Timer kopieren (kein Quadlet, eigener Zielpfad)
+      ansible.builtin.copy:
+        src: "{{ local_timers_path }}/"
+        dest: "{{ remote_systemd_user_dir }}/"
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 5. Neue/geaenderte Units bekannt machen
+    # ------------------------------------------------------------------
+    - name: systemctl --user daemon-reload
+      ansible.builtin.systemd:
+        scope: user
+        daemon_reload: yes
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    # ------------------------------------------------------------------
+    # 6. Dienste + Timer (neu) starten/aktivieren
+    # ------------------------------------------------------------------
+    - name: Dienste aktivieren + starten
+      loop: "{{ managed_units }}"
+      ansible.builtin.systemd:
+        scope: user
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: podman-prune.timer aktivieren + starten
+      ansible.builtin.systemd:
+        scope: user
+        name: podman-prune.timer
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    # ------------------------------------------------------------------
+    # 7. Optionaler Sofort-Deploy (nur bei explizitem --tags)
+    # ------------------------------------------------------------------
+    - name: "Sofort-Deploy vb-api: Image pullen"
+      tags: [never, deploy-api]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Sofort-Deploy vb-api: Service neu starten"
+      tags: [never, deploy-api]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-api-prod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: "Sofort-Deploy vb-intern: Image pullen"
+      tags: [never, deploy-intern]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-intern:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Sofort-Deploy vb-intern: Service neu starten"
+      tags: [never, deploy-intern]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-intern-prod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: "Sofort-Deploy vb-www: Image pullen"
+      tags: [never, deploy-www]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Sofort-Deploy vb-www: Service neu starten"
+      tags: [never, deploy-www]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-www-prod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"

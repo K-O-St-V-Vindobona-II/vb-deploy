@@ -24,6 +24,16 @@
     - name: Podman-5-Repo einrichten (Debian/Ubuntu)
       when: ansible_os_family == "Debian"
       block:
+        - name: gnupg installieren (von apt_repository fuer Key-Handling benoetigt)
+          # Minimale Debian-13-Images (z.B. manche Hoster-Netinstall-Varianten)
+          # haben weder "gpg" noch das veraltete "apt-key" vorinstalliert -
+          # ansible.builtin.apt_repository braucht zwingend eines von beiden,
+          # auch wenn wir selbst schon modernes signed-by= verwenden.
+          ansible.builtin.apt:
+            name: gnupg
+            state: present
+            update_cache: yes
+
         - name: /etc/apt/keyrings sicherstellen
           ansible.builtin.file:
             path: /etc/apt/keyrings

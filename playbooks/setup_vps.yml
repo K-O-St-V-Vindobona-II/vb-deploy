@@ -32,13 +32,13 @@
 
         - name: Alvistack GPG-Key herunterladen
           ansible.builtin.get_url:
-            url: "https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_version }}/Release.key"
+            url: "https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_major_version }}/Release.key"
             dest: /etc/apt/keyrings/alvistack.asc
             mode: "0644"
 
         - name: Alvistack APT-Repo eintragen
           ansible.builtin.apt_repository:
-            repo: "deb [signed-by=/etc/apt/keyrings/alvistack.asc] https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_version }}/ /"
+            repo: "deb [signed-by=/etc/apt/keyrings/alvistack.asc] https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_major_version }}/ /"
             state: present
             filename: alvistack-podman
 
@@ -50,10 +50,14 @@
         mode: "0644"
 
     - name: Podman-5-Repo einrichten (SUSE/openSUSE)
+      # Alvistack folgt hier keinem generischen "{distribution}_{version}"-Schema
+      # (z.B. "openSUSE_Leap_15.6", nicht "openSUSE Leap_15.6") - deshalb wie beim
+      # RedHat-Zweig fest verdrahtet statt templated. Ungetestet (kein SUSE-Host
+      # verfuegbar) - vor produktivem Einsatz auf einem echten SUSE-Host verifizieren.
       when: ansible_os_family == "Suse"
       community.general.zypper_repository:
         name: alvistack-podman
-        repo: "https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_version }}/"
+        repo: "https://download.opensuse.org/repositories/home:/alvistack/openSUSE_Leap_15.6/"
         auto_import_keys: yes
         state: present
 
@@ -249,8 +253,47 @@
         mode: "0644"
       notify: reload sysctl
 
+    - name: ~/.config/containers fuer "service" anlegen
+      ansible.builtin.file:
+        path: /home/service/.config/containers
+        state: directory
+        owner: service
+        group: service
+        mode: "0755"
+
+    - name: Rootless-Storage-Override fuer "service" schreiben
+      # Das von Alvistack ausgelieferte /usr/share/containers/storage.conf
+      # setzt "runroot" unbedingt auf den root-only Pfad
+      # "/run/containers/storage" - das uebersteuert Podmans eigene
+      # Rootless-Autoerkennung und laesst jeden Container-Start mit
+      # "permission denied" scheitern. Fix: eine eigene, minimale
+      # storage.conf fuer "service" OHNE runroot/graphroot-Zeile - dann
+      # greift wieder Podmans korrekter Rootless-Default
+      # ("$XDG_RUNTIME_DIR/containers" bzw. "~/.local/share/containers/storage").
+      ansible.builtin.copy:
+        dest: /home/service/.config/containers/storage.conf
+        content: |
+          [storage]
+          driver = "overlay"
+        owner: service
+        group: service
+        mode: "0644"
+
     # ------------------------------------------------------------------
-    # 7. Firewall: nur noch SSH + HTTP/HTTPS (Caddy)
+    # 7. Reboot JETZT (finalisiert Kernel/Podman/sysctl-Aenderungen) -
+    # bewusst VOR der SSH-Haertung: das Reboot-Modul verbindet sich nach
+    # dem Neustart erneut als root, um den Host-Status zu pruefen. Wuerde
+    # PermitRootLogin=no schon vorher auf die Platte geschrieben sein,
+    # haette der frisch gestartete sshd root sofort ausgesperrt und das
+    # Modul haette sich bis zum reboot_timeout an der eigenen
+    # Reconnect-Pruefung aufgehaengt.
+    # ------------------------------------------------------------------
+    - name: Host neu starten (finalisiert Kernel/Podman/systemd-Aenderungen)
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+
+    # ------------------------------------------------------------------
+    # 8. Firewall: nur noch SSH + HTTP/HTTPS (Caddy)
     # ------------------------------------------------------------------
     - name: Firewall konfigurieren (Debian/UFW)
       when: ansible_os_family == "Debian"
@@ -281,7 +324,8 @@
         - ansible.builtin.command: firewall-cmd --reload
 
     # ------------------------------------------------------------------
-    # 8. SSH-Haertung
+    # 9. SSH-Haertung (nach dem Reboot - sperrt root erst am Play-Ende
+    # per Handler aus, keine root-Verbindung mehr noetig ab hier)
     # ------------------------------------------------------------------
     - name: Root-SSH-Login deaktivieren
       ansible.builtin.lineinfile:
@@ -300,16 +344,12 @@
       notify: restart sshd
 
     # ------------------------------------------------------------------
-    # 9. Abschluss: Passwort-Hinweis + Reboot
+    # 10. Abschluss: Passwort-Hinweis
     # ------------------------------------------------------------------
     - name: Generiertes admin-Passwort anzeigen (nur bei Neuanlage!)
       when: admin_check.rc != 0
       ansible.builtin.debug:
         msg: "WICHTIG - jetzt sofort im Passwort-Safe sichern: admin / {{ admin_pw }}"
-
-    - name: Host neu starten (finalisiert Kernel/Podman/systemd-Aenderungen)
-      ansible.builtin.reboot:
-        reboot_timeout: 600
 
   handlers:
     - name: reload sysctl

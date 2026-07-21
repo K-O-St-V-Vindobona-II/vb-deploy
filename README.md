@@ -6,6 +6,9 @@ deployt und im Ernstfall wiederherstellt. Dieses Repo selbst enthält alles
 Betriebliche: Ansible-Playbooks, Caddy-Konfiguration, Podman-Quadlets und
 (vault-verschlüsselte) Secrets.
 
+Alle relevanten Repos sind in der GitHub-Organisation
+[K-O-St-V-Vindobona-II](https://github.com/K-O-St-V-Vindobona-II) zusammengefasst.
+
 ## Die 4 Repos im Überblick
 
 | Repo | Was | Tech-Stack | Wird deployt als |

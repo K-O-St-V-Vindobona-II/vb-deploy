@@ -2,11 +2,11 @@
 Description=PostgreSQL for VB API (Prod)
 
 [Container]
-ContainerName=vb-api-pg-prod
-Pod=vb-api-prod.pod
+ContainerName=vb-api-pg
+Pod=vb-api.pod
 Image=docker.io/library/postgres:17
 AutoUpdate=registry
-EnvironmentFile=%h/.env/vb-api-pg-prod.env
+EnvironmentFile=%h/.env/vb-api-pg.env
 Volume=%h/data/vb/api/postgres:/var/lib/postgresql/data:Z
 
 HealthCmd=pg_isready -U vb -d vb || exit 1

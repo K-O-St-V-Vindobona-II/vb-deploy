@@ -1,0 +1,11 @@
+[Unit]
+Wants=vb-api-pg.service vb-api.service
+Before=vb-api-pg.service vb-api.service
+
+[Pod]
+PodName=vb-api-pod
+AddHost=www.vindobona2.at:host-gateway
+PublishPort=127.0.0.1:21000:8000
+
+[Install]
+WantedBy=default.target

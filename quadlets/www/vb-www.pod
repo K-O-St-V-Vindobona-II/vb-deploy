@@ -1,9 +1,9 @@
 [Unit]
-Wants=vb-www-prod.service
-Before=vb-www-prod.service
+Wants=vb-www.service
+Before=vb-www.service
 
 [Pod]
-PodName=vb-www-prod-pod
+PodName=vb-www-pod
 PublishPort=127.0.0.1:21002:80
 
 [Install]

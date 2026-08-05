@@ -13,9 +13,9 @@ Alle relevanten Repos sind in der GitHub-Organisation
 
 | Repo | Was | Tech-Stack | Wird deployt als |
 |---|---|---|---|
-| [`vb-api`](../vb-api) | Backend: internes Vereinsverwaltungssystem (Mitglieder/Beiträge, Standesdb, Archiv, P4x-Finanzbuchhaltung, Scheduler-Jobs, ...) | Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 17, S3-kompatibler Storage | `vb-api-prod` + `vb-api-pg-prod` (ein Pod) |
-| [`vb-intern`](../vb-intern) | Frontend zu `vb-api`: die eigentliche Verwaltungsoberfläche für Vereinsmitglieder/Funktionäre (Login erforderlich) | Vue 3 (`<script setup>`, TypeScript), Vite, nginx zur Auslieferung | `vb-intern-prod` |
-| [`vb-www`](../vb-www) | Öffentliche, unauthentifizierte Website `www.vindobona2.at` (Marketing/Info, Galerie, Kontaktformular) | Vue 3, TypeScript, Vite, nginx | `vb-www-prod` |
+| [`vb-api`](../vb-api) | Backend: internes Vereinsverwaltungssystem (Mitglieder/Beiträge, Standesdb, Archiv, P4x-Finanzbuchhaltung, Scheduler-Jobs, ...) | Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 17, S3-kompatibler Storage | `vb-api` + `vb-api-pg` (ein Pod) |
+| [`vb-intern`](../vb-intern) | Frontend zu `vb-api`: die eigentliche Verwaltungsoberfläche für Vereinsmitglieder/Funktionäre (Login erforderlich) | Vue 3 (`<script setup>`, TypeScript), Vite, nginx zur Auslieferung | `vb-intern` |
+| [`vb-www`](../vb-www) | Öffentliche, unauthentifizierte Website `www.vindobona2.at` (Marketing/Info, Galerie, Kontaktformular) | Vue 3, TypeScript, Vite, nginx | `vb-www` |
 | `vb-deploy` (dieses Repo) | Betrieb: Ansible, Caddy, Quadlets, Secrets | Ansible, systemd Quadlets | läuft nicht selbst als Service — konfiguriert die anderen |
 
 Alle drei App-Repos bauen ihr Container-Image selbst per CI/CD (GitHub Actions)
@@ -56,10 +56,14 @@ Root-Aufgaben (`sudo`), er betreibt selbst keine Container.
   übersetzt. Vorteil ggü. `docker-compose`: native systemd-Integration
   (`systemctl --user status/restart/logs`, automatischer Neustart, Healthchecks,
   Boot-Persistenz) ohne zusätzlichen Compose-Daemon.
-- **Ein Pod pro App**: `vb-api-prod-pod` enthält `vb-api-prod` (Backend) +
-  `vb-api-pg-prod` (PostgreSQL) — beide teilen sich ein Netzwerk-Namespace,
-  das Backend erreicht die DB einfach über `localhost`. `vb-intern-prod-pod`
-  und `vb-www-prod-pod` enthalten je einen einzelnen nginx-Container.
+- **Ein Pod pro App**: `vb-api-pod` enthält `vb-api` (Backend) +
+  `vb-api-pg` (PostgreSQL) — beide teilen sich ein Netzwerk-Namespace,
+  das Backend erreicht die DB einfach über `localhost`. `vb-intern-pod`
+  und `vb-www-pod` enthalten je einen einzelnen nginx-Container. Pod-/
+  Container-Namen sind stage-unabhängig identisch (auch auf der
+  Dev-Stage) — welche Stage ein Container ist, entscheidet ausschließlich
+  `APP_ENVIRONMENT`/`VITE_APP_ENVIRONMENT` in seiner `EnvironmentFile`,
+  nie der Name selbst.
 - **Caddy** ist der einzige Dienst, der öffentlich auf Port 80/443 lauscht.
   Er terminiert TLS (automatisches Let's-Encrypt-Zertifikat) und reverse-proxied
   anhand des Hostnamens auf die jeweilige App, die selbst nur auf
@@ -69,10 +73,10 @@ Root-Aufgaben (`sudo`), er betreibt selbst keine Container.
      │  :80 / :443
      ▼
   Caddy (Host-Netzwerk)
-     ├─ api.vindobona2.at    → 127.0.0.1:21000 → vb-api-prod-pod
-     ├─ intern.vindobona2.at → 127.0.0.1:21001 → vb-intern-prod-pod
+     ├─ api.vindobona2.at    → 127.0.0.1:21000 → vb-api-pod
+     ├─ intern.vindobona2.at → 127.0.0.1:21001 → vb-intern-pod
      │    └─ /logging/dozzle* (Basic-Auth) → 127.0.0.1:8081 → Dozzle
-     └─ www.vindobona2.at    → 127.0.0.1:21002 → vb-www-prod-pod
+     └─ www.vindobona2.at    → 127.0.0.1:21002 → vb-www-pod
   ```
 - **Image-Bezug**: Alle App-Container haben `Image=ghcr.io/.../<name>:latest` +
   `AutoUpdate=registry`. Der von Podman selbst mitgelieferte
@@ -105,7 +109,7 @@ durchgespielt — jeder Schritt hier hat sich in der Praxis bewährt.
 **0. Vorbereitung, bevor der alte Host abgeschaltet wird (falls möglich):**
 - Wartungsfenster ankündigen.
 - **Manuelles Backup auslösen**, um die Datenverlust-Lücke zum letzten
-  automatischen Backup zu minimieren: `podman exec vb-api-prod python
+  automatischen Backup zu minimieren: `podman exec vb-api python
   scripts/backup_db.py` auf dem noch laufenden alten Host (oder der Button
   "Backup jetzt erstellen" in `vb-intern` unter System → Scheduler). Der
   tägliche `db_backup`-Job läuft sonst nur einmal pro Nacht — ohne diesen
@@ -154,7 +158,7 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
   auf dem Zielsystem — alle Services `active`/`healthy`, keine `failed`.
 - Datenbank-Stichprobe, um zu bestätigen, dass der Restore echte (nicht
   leere) Daten gebracht hat, z. B.:
-  `podman exec vb-api-pg-prod psql -U vb -d vb -c 'SELECT count(*) FROM members;'`
+  `podman exec vb-api-pg psql -U vb -d vb -c 'SELECT count(*) FROM members;'`
 - `ufw status verbose` (als `admin`, mit `sudo`) — nur 22/80/443 offen.
 - `systemctl --user list-timers --all` — `podman-auto-update.timer` und
   `podman-prune.timer` aktiv.
@@ -239,15 +243,15 @@ wieder hochzieht). Läuft nur, wenn der Tag explizit angegeben wird.
 ### Secrets pflegen
 
 ```bash
-ansible-vault edit secrets/vb-api-prod.env
-ansible-vault view secrets/vb-api-prod.env
+ansible-vault edit secrets/vb-api.env
+ansible-vault view secrets/vb-api.env
 ```
 
 ## Operative Skripte in `vb-api`
 
 Neben den Ansible-Playbooks hier gibt es in `vb-api/scripts/` eine Reihe
-Betriebs-Skripte, die **auf dem P-System, im laufenden `vb-api-prod`-Container**
-ausgeführt werden (`podman exec vb-api-prod python scripts/<name>.py` — nicht
+Betriebs-Skripte, die **auf dem P-System, im laufenden `vb-api`-Container**
+ausgeführt werden (`podman exec vb-api python scripts/<name>.py` — nicht
 lokal auf dem eigenen Rechner!). Volle Doku inkl. aller Parameter:
 [`vb-api/scripts/README.md`](../vb-api/scripts/README.md). Die für den
 Alltag relevanten:
@@ -278,10 +282,10 @@ nicht lokal:
 ssh service@<hostname-oder-ip-des-p-systems>
 
 # 1. Verfuegbare Backups ansehen (optional, nur zur Kontrolle):
-podman exec vb-api-prod python scripts/restore_db.py --list
+podman exec vb-api python scripts/restore_db.py --list
 
 # 2. Restore ausfuehren (nimmt ohne --backup-name automatisch das neueste):
-podman exec -it vb-api-prod python scripts/restore_db.py --force
+podman exec -it vb-api python scripts/restore_db.py --force
 ```
 
 `--force` ist zwingend erforderlich, weil `restore_db.py` einen Restore bei

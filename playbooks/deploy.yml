@@ -44,18 +44,18 @@
 
     # Units, die nach jedem Sync explizit (neu) aktiviert/gestartet werden.
     # Wants=/After= in den .pod-Dateien wirkt nur beim ALLERERSTEN Start
-    # eines Pods - laeuft der Haupt-Container (z.B. vb-api-prod.service)
+    # eines Pods - laeuft der Haupt-Container (z.B. vb-api.service)
     # bereits, ruehrt Ansibles "state: started" ihn nicht mehr an, und eine
-    # zuvor fehlgeschlagene Abhaengigkeit (z.B. vb-api-pg-prod.service)
+    # zuvor fehlgeschlagene Abhaengigkeit (z.B. vb-api-pg.service)
     # bleibt "failed" haengen, statt erneut versucht zu werden. Deshalb
     # explizit auflisten statt auf die Pod-Abhaengigkeit zu vertrauen.
     managed_units:
       - caddy.service
       - logging-dozzle.service
-      - vb-api-pg-prod.service
-      - vb-api-prod.service
-      - vb-intern-prod.service
-      - vb-www-prod.service
+      - vb-api-pg.service
+      - vb-api.service
+      - vb-intern.service
+      - vb-www.service
 
   tasks:
     # ------------------------------------------------------------------
@@ -175,8 +175,8 @@
       changed_when: true
 
     - name: "Sofort-Deploy vb-api: Pod neu starten"
-      # NICHT vb-api-prod.service direkt neu starten: der Container ist
-      # per generiertem BindsTo= an vb-api-prod-pod.service gebunden -
+      # NICHT vb-api.service direkt neu starten: der Container ist
+      # per generiertem BindsTo= an vb-api-pod.service gebunden -
       # ein Container-Restart stoppt (und entfernt) dabei den ganzen Pod,
       # aber nichts startet den Pod danach von selbst wieder ("Dependency
       # failed", empirisch verifiziert). Der Pod-Service selbst zieht
@@ -185,7 +185,7 @@
       tags: [never, deploy-api]
       ansible.builtin.systemd:
         scope: user
-        name: vb-api-prod-pod.service
+        name: vb-api-pod.service
         state: restarted
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
@@ -202,7 +202,7 @@
       tags: [never, deploy-intern]
       ansible.builtin.systemd:
         scope: user
-        name: vb-intern-prod-pod.service
+        name: vb-intern-pod.service
         state: restarted
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
@@ -219,7 +219,7 @@
       tags: [never, deploy-www]
       ansible.builtin.systemd:
         scope: user
-        name: vb-www-prod-pod.service
+        name: vb-www-pod.service
         state: restarted
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"

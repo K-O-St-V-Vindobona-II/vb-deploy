@@ -6,6 +6,11 @@ Before=vb-api-pg.service vb-api.service
 PodName=vb-api-pod
 AddHost=www.vindobona2.at:host-gateway
 PublishPort=127.0.0.1:21000:8000
+# IPv4-only: pasta's default dual-stack IPv6 passthrough is fragile in this
+# host's network setup and can silently black-hole outbound IPv6 connections
+# (e.g. to Google's cert endpoint during Google Login) without ever erroring
+# or timing out on its own. Nothing in this stack needs outbound IPv6.
+Network=pasta:-4
 
 [Install]
 WantedBy=default.target

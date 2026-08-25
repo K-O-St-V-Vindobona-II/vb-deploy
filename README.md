@@ -260,10 +260,6 @@ Alltag relevanten:
 | `check_s3_integrity.py` | Read-only-Konsistenzcheck DB ↔ S3 (fehlende Objekte + Waisen), löscht nie etwas selbst. |
 | `downsync_prod.py` | Nur auf der **Dev/Non-Prod-Stage** relevant: zieht Prod-S3 + darauf aufbauend die lokale DB auf den aktuellen Prod-Stand. Verweigert sich hart auf `APP_ENVIRONMENT=production`. |
 
-Die übrigen Skripte (`sqlite2pg.py`, `migrate_to_s3.py`,
-`migrate_public_gallery.py`) waren einmalige, historische Migrationen und sind
-für den Alltagsbetrieb nicht mehr relevant.
-
 ## Disaster Recovery / Datenbank-Restore
 
 Läuft **nicht** über dieses Repo — `deploy.yml` startet Postgres nur, füllt es

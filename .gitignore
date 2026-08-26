@@ -1,3 +1,5 @@
+# Local Ansible Vault password file - never committed, see README.md's
+# "Secrets pflegen" section.
 .vault_pass
 *.retry
 *.log

@@ -91,10 +91,7 @@ Root-Aufgaben (`sudo`), er betreibt selbst keine Container.
   (Production: `~/data/vb/production/postgres`) — das ist der einzige
   Datenbestand, der bei einem VPS-Verlust/Neuaufsetzen wirklich weg ist und
   aus einem S3-Backup zurückgeholt werden muss (siehe
-  [Disaster Recovery](#disaster-recovery--datenbank-restore) unten). Läuft auf
-  einem Host noch eine ältere Instanz mit dem stage-losen Vorgänger-Pfad
-  `~/data/vb/api/postgres`, ist ein einmaliger manueller Umzug nötig (siehe
-  [Einmaliger Migrationsschritt: Postgres-Datenpfad](#einmaliger-migrationsschritt-postgres-datenpfad)).
+  [Disaster Recovery](#disaster-recovery--datenbank-restore) unten).
 - **Dozzle** ist ein simpler, schreibgeschützter Log-Viewer für alle laufenden
   Container (liest den Podman-Socket read-only), erreichbar über
   `intern.vindobona2.at/logging/dozzle` hinter Basic-Auth.
@@ -356,34 +353,10 @@ wird automatisch der zeitlich neueste Dump im S3-Bucket verwendet.
 dass der Befehl fehlerfrei durchlief) — z. B. per Stichprobe wie in Schritt 6
 des Runbooks oben.
 
-### Einmaliger Migrationsschritt: Postgres-Datenpfad
-
-Nötig genau einmal, für jeden Host, der aktuell noch den alten, stage-losen
-Pfad `~/data/vb/api/postgres` verwendet (vor der Umstellung auf
-[stage-spezifische Pfade](#stages)):
-
-```bash
-# Auf dem P-System einloggen:
-ssh service@<hostname-oder-ip-des-p-systems>
-
-systemctl --user stop vb-api-pg.service
-mv ~/data/vb/api/postgres ~/data/vb/production/postgres
-exit
-
-# Lokal: deploy.yml erneut laufen lassen - rendert das Postgres-Quadlet mit
-# dem neuen Pfad und startet vb-api-pg.service neu:
-ansible-playbook -i inventory/production.ini playbooks/deploy.yml --ask-vault-pass
-```
-
-Kurzes Downtime-Fenster einplanen — das Backend ist während des
-`stop`/`mv`/Deploy-Zyklus nicht erreichbar, da es ohne laufende Datenbank
-nicht funktioniert.
-
 ### Frisches Postgres-Datenverzeichnis
 
 Zwei Fallstricke, die beim PostgreSQL-18-Upgrade tatsächlich aufgetreten
-sind — relevant sowohl für den Migrationsschritt oben als auch für jede neue
-Stage mit einem frischen VPS:
+sind — relevant für jede neue Stage mit einem frischen VPS:
 
 1. **Mount-Konvention:** Das Volume mountet bewusst eine Ebene höher als das
    eigentliche PG18-Datenverzeichnis
@@ -404,6 +377,16 @@ chmod 700 ~/data/vb/<stage>/postgres
 
 Nötig einmalig vor dem allerersten Start auf einem neuen/leeren
 Datenverzeichnis — nicht bei jedem regulären Deploy.
+
+**Gilt generell, nicht nur für `chown`:** Sobald das Datenverzeichnis
+einmal von Postgres initialisiert wurde, gehört es der gemappten
+`postgres`-UID (nicht `service`) — jede weitere Host-seitige
+Dateisystem-Operation darauf (`mv`, `rm`, `cp`, ...) braucht ebenfalls
+`podman unshare`, sonst scheitert sie mit "Keine Berechtigung", selbst
+wenn das Elternverzeichnis `service` gehört und beschreibbar ist (beim
+Verschieben/Umbenennen eines Verzeichnisses muss dessen eigener
+`..`-Eintrag aktualisiert werden, was Schreibrecht auf das Verzeichnis
+selbst voraussetzt — nicht nur auf die Elternverzeichnisse).
 
 ## Lokale Entwicklungsumgebung
 

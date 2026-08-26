@@ -1,16 +1,19 @@
 [Unit]
-Description=VB API Backend (Prod)
+Description=VB API Backend (Dev)
 After=vb-api-pg.service
 
 [Container]
 ContainerName=vb-api
 Pod=vb-api.pod
-Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
-AutoUpdate=registry
+Image=vb-api:dev
+AutoUpdate=local
+
+Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
+UserNS=keep-id
+Environment=WATCHFILES_FORCE_POLLING=true
 EnvironmentFile=%h/.env/vb-api.env
-# Optional: AWS-Credentials fuer den Prod-Downsync-Job. Bleibt bewusst
-# ausserhalb des Vault-Systems (manuell auf dem Host abgelegt) - das
-# fuehrende "-" macht die Datei optional, ihr Fehlen ist kein Fehler.
+# Optional: AWS credentials for the non-prod downsync script/job. The
+# leading "-" makes the file optional - its absence is not an error.
 EnvironmentFile=-%h/.env/vb-api-aws-prod.env
 
 HealthCmd=python3 -c 'import urllib.request; urllib.request.urlopen("http://localhost:8000/")'

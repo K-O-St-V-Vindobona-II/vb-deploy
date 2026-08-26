@@ -1,0 +1,5 @@
+[Pod]
+PodName=vb-minio-pod
+PublishPort=127.0.0.1:9000:9000
+PublishPort=127.0.0.1:9001:9001
+AddHost=<your-minio-dev-domain>:host-gateway

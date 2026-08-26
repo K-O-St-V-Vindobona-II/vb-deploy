@@ -1,0 +1,20 @@
+[Unit]
+Description=PostgreSQL for VB API (Prod)
+
+[Container]
+ContainerName=vb-api-pg
+Pod=vb-api.pod
+Image=docker.io/library/postgres:18
+AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-api-pg.env
+Volume=%h/data/vb/{{ app_environment }}/postgres:/var/lib/postgresql:Z
+
+HealthCmd=pg_isready -U vb -d vb || exit 1
+HealthInterval=10s
+HealthTimeout=10s
+HealthStartPeriod=15s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=180

@@ -2,8 +2,8 @@
 # Grundkonfiguration eines neuen VPS: nacktes System -> gehaertetes,
 # rootless-Podman-faehiges System mit den Usern "admin" und "service".
 #
-# Erstlauf:  ansible-playbook playbooks/setup_vps.yml -u root
-# Re-Runs:   ansible-playbook playbooks/setup_vps.yml -u admin --ask-become-pass
+# Erstlauf:  ansible-playbook -i inventory/production.ini playbooks/setup_vps.yml -u root
+# Re-Runs:   ansible-playbook -i inventory/production.ini playbooks/setup_vps.yml -u admin --ask-become-pass
 #            (root-SSH-Login wird am Ende dieses Playbooks deaktiviert)
 #
 # Dieses Playbook ist die Bus-Faktor-Absicherung fuer den Fall, dass das

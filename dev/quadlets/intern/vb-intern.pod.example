@@ -1,0 +1,6 @@
+[Pod]
+PodName=vb-intern-pod
+PublishPort=127.0.0.1:20001:5173
+
+[Install]
+WantedBy=default.target

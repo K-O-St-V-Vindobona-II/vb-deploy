@@ -1,0 +1,24 @@
+[Unit]
+Description=VB MinIO (S3-compatible storage)
+
+[Container]
+ContainerName=vb-minio
+Pod=vb-minio.pod
+Image=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+AutoUpdate=registry
+Exec=server /data --console-address ":9001"
+
+EnvironmentFile=%h/.env/vb-minio.env
+Volume=vb-minio-data.volume:/data
+
+HealthCmd=curl -sf http://localhost:9000/minio/health/live || exit 1
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=15s
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

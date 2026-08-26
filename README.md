@@ -23,12 +23,17 @@ config and secrets and makes sure the right images are running.
 
 ## Architecture: rootless Podman on a VPS
 
-A single VPS (the "P-System") carries the entire production setup. Instead
-of classic root Docker containers, everything runs **rootless** under a
-dedicated, unprivileged Linux user named `service` — containers thus run
-without root privileges on the host, so a compromised container can't
-directly escalate to host root. A second user, `admin`, exists solely for
-administrative root tasks (`sudo`) and never runs any containers itself.
+Production runs deliberately on a single VPS (the "P-System") rather than
+on a cluster. For a system of this scale, that's not a compromise —
+it's the right call: a VPS is the leanest system available to operate,
+with no Kubernetes overhead, no multi-node complexity, low cost, and
+manageable maintenance. Rootless Podman is what makes this approach viable
+from a security standpoint: instead of classic root Docker containers,
+everything runs **rootless** under a dedicated, unprivileged Linux user
+named `service` — containers thus run without root privileges on the
+host, so a compromised container can't directly escalate to host root. A
+second user, `admin`, exists solely for administrative root tasks
+(`sudo`) and never runs any containers itself.
 
 > **Aside: why two users (`admin` + `service`) instead of one?**
 > The separation is a deliberate security boundary, not an accident.
@@ -481,12 +486,18 @@ und Secrets und sorgt dafür, dass die richtigen Images laufen.
 
 ## Architektur: rootless Podman auf einem VPS
 
-Ein einzelner VPS (P-System) trägt die gesamte Produktion. Statt klassischer
-Root-Docker-Container läuft alles **rootless** unter einem eigenen, unprivilegierten
-Linux-User namens `service` — Container laufen dadurch ohne Root-Rechte auf dem
-Host, ein kompromittierter Container kann also nicht direkt auf Host-Root
-eskalieren. Ein zweiter User `admin` existiert nur für administrative
-Root-Aufgaben (`sudo`), er betreibt selbst keine Container.
+Die gesamte Produktion läuft bewusst auf einem einzigen VPS (P-System) statt
+auf einem Cluster. Für die Größenordnung dieses Systems ist das kein
+Kompromiss, sondern die richtige Wahl: Ein VPS ist das schlankeste System,
+das man betreiben kann — kein Kubernetes-Overhead, keine
+Multi-Node-Komplexität, dafür geringe Kosten und überschaubarer
+Wartungsaufwand. Rootless Podman ist es, was diesen Ansatz sicherheitstechnisch
+tragfähig macht: Statt klassischer Root-Docker-Container läuft alles
+**rootless** unter einem eigenen, unprivilegierten Linux-User namens
+`service` — Container laufen dadurch ohne Root-Rechte auf dem Host, ein
+kompromittierter Container kann also nicht direkt auf Host-Root eskalieren.
+Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
+(`sudo`), er betreibt selbst keine Container.
 
 > **Exkurs: Warum zwei User (`admin` + `service`) statt einem?**
 > Die Trennung ist eine bewusste Sicherheitsgrenze, kein Zufall. `service`

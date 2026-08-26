@@ -26,6 +26,7 @@
     local_quadlets_path: "../quadlets"
     local_timers_path: "../systemd-timers"
     local_caddyfile_template: "../config/caddy/Caddyfile.j2"
+    local_api_quadlet_template: "../templates/vb-api.container.j2"
     local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
 
     remote_env_dir: "{{ ansible_user_dir }}/.env"
@@ -163,6 +164,12 @@
       ansible.builtin.copy:
         src: "{{ local_quadlets_path }}/{{ item.src }}/"
         dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
+        mode: "0644"
+
+    - name: API-Quadlet rendern (AWS-Prod-EnvironmentFile nur ausserhalb production)
+      ansible.builtin.template:
+        src: "{{ local_api_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.container"
         mode: "0644"
 
     - name: Postgres-Quadlet rendern (Datenpfad kommt aus app_environment)

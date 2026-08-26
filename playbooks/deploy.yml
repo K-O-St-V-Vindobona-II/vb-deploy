@@ -7,7 +7,9 @@
 # und werden vom bereits aktiven podman-auto-update.timer automatisch
 # eingespielt).
 #
-# Aufruf: ansible-playbook -i inventory/hosts.ini playbooks/deploy.yml --ask-vault-pass
+# Multi-Stage: -i waehlt die Stage, es gibt kein Default-Inventory.
+#
+# Aufruf: ansible-playbook -i inventory/<stage>.ini playbooks/deploy.yml --ask-vault-pass
 #
 # Sofort-Deploy statt auf den naechtlichen Auto-Update-Lauf zu warten:
 #   ansible-playbook ... --ask-vault-pass --tags deploy-api
@@ -20,10 +22,11 @@
   remote_user: service
   gather_facts: yes
   vars:
-    local_secrets_path: "../secrets"
+    local_secrets_path: "../secrets/{{ app_environment }}"
     local_quadlets_path: "../quadlets"
     local_timers_path: "../systemd-timers"
-    local_caddyfile: "../config/caddy/Caddyfile"
+    local_caddyfile_template: "../config/caddy/Caddyfile.j2"
+    local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
 
     remote_env_dir: "{{ ansible_user_dir }}/.env"
     remote_quadlet_base: "{{ ansible_user_dir }}/.config/containers/systemd"
@@ -59,6 +62,20 @@
 
   tasks:
     # ------------------------------------------------------------------
+    # 0. Stage validieren
+    # ------------------------------------------------------------------
+    - name: "Stage validieren"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - app_environment in ['test', 'qa', 'production']
+        fail_msg: >-
+          app_environment muss test, qa oder production sein (aktuell:
+          '{{ app_environment }}'). Development-Instanzen laufen nie ueber
+          dieses Repo, sondern lokal per eigenen Podman-Quadlets.
+        success_msg: "Stage '{{ app_environment }}' ist gueltig."
+
+    # ------------------------------------------------------------------
     # 1. Verzeichnisse sicherstellen
     # ------------------------------------------------------------------
     - name: Verzeichnisstruktur anlegen
@@ -68,7 +85,7 @@
         - "{{ remote_systemd_user_dir }}"
         - "{{ remote_caddy_config_dir }}"
         - "{{ ansible_user_dir }}/.local/share/caddy/caddy_data"
-        - "{{ ansible_user_dir }}/data/vb/api/postgres"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres"
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -76,9 +93,13 @@
 
     # ------------------------------------------------------------------
     # 2. Secrets verteilen (ansible-vault-verschluesselt im Repo,
-    #    Ansible entschluesselt transparent beim Kopieren)
+    #    Ansible entschluesselt transparent beim Kopieren/Rendern).
+    #    Zwei Paare: statische *.env-Dateien werden 1:1 kopiert,
+    #    *.env.j2-Dateien werden zuerst mit den Stage-/Domain-Vars
+    #    aus der Inventory gerendert (Vault-Entschluesselung passiert
+    #    dabei zuerst, das Jinja2-Templating danach - keine Kollision).
     # ------------------------------------------------------------------
-    - name: "*.env aus secrets/ finden"
+    - name: "*.env aus secrets/<stage>/ finden"
       delegate_to: localhost
       become: no
       ansible.builtin.find:
@@ -96,12 +117,30 @@
         dest: "{{ remote_env_dir }}/{{ item.path | basename }}"
         mode: "0600"
 
+    - name: "*.env.j2 aus secrets/<stage>/ finden"
+      delegate_to: localhost
+      become: no
+      ansible.builtin.find:
+        paths: "{{ local_secrets_path }}"
+        patterns: "*.env.j2"
+      register: secret_templates
+
+    - name: Secret-Templates rendern nach ~/.env
+      no_log: true
+      loop: "{{ secret_templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ remote_env_dir }}/{{ item.path | basename | regex_replace('\\.j2$', '') }}"
+        mode: "0600"
+
     # ------------------------------------------------------------------
-    # 3. Caddyfile synchronisieren
+    # 3. Caddyfile rendern (Hosts kommen aus den Stage-Domain-Vars)
     # ------------------------------------------------------------------
-    - name: Caddyfile kopieren
-      ansible.builtin.copy:
-        src: "{{ local_caddyfile }}"
+    - name: Caddyfile rendern
+      ansible.builtin.template:
+        src: "{{ local_caddyfile_template }}"
         dest: "{{ remote_caddy_config_dir }}/Caddyfile"
         mode: "0644"
 
@@ -124,6 +163,12 @@
       ansible.builtin.copy:
         src: "{{ local_quadlets_path }}/{{ item.src }}/"
         dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
+        mode: "0644"
+
+    - name: Postgres-Quadlet rendern (Datenpfad kommt aus app_environment)
+      ansible.builtin.template:
+        src: "{{ local_pg_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-pg.container"
         mode: "0644"
 
     - name: Systemd-Timer kopieren (kein Quadlet, eigener Zielpfad)

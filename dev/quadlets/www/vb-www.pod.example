@@ -1,0 +1,6 @@
+[Pod]
+PodName=vb-www-pod
+PublishPort=127.0.0.1:20002:5173
+
+[Install]
+WantedBy=default.target

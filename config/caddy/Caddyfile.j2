@@ -6,7 +6,7 @@
 	}
 }
 
-intern.vindobona2.at {
+{{ intern_domain }} {
 	basic_auth /logging* {
 		{$LOGGING_USER} {$LOGGING_PASSWORD_HASH}
 	}
@@ -18,13 +18,13 @@ intern.vindobona2.at {
 	}
 }
 
-api.vindobona2.at {
+{{ api_domain }} {
 	reverse_proxy 127.0.0.1:21000 {
 		header_down -Server
 	}
 }
 
-www.vindobona2.at {
+{{ www_domain }} {
 	reverse_proxy 127.0.0.1:21002 {
 		header_down -Server
 	}

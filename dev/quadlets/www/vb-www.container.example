@@ -1,0 +1,23 @@
+[Unit]
+Description=VB www Public Site (Dev)
+
+[Container]
+ContainerName=vb-www
+Pod=vb-www.pod
+Image=docker.io/library/node:22-slim
+Volume=<path-to-vb-fastapi-vue>/vb-www:/app:Z
+UserNS=keep-id
+PodmanArgs=--workdir=/app
+Exec=npm run dev -- --host 0.0.0.0
+EnvironmentFile=%h/.env/vb-www.env
+
+HealthCmd=node -e 'const h=require("http");h.get("http://localhost:5173/",r=>{process.exit(r.statusCode===200?0:1)}).on("error",()=>process.exit(1))'
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=15s
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=60

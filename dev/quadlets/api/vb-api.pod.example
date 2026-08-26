@@ -1,0 +1,11 @@
+[Pod]
+PodName=vb-api-pod
+PublishPort=127.0.0.1:20000:8000
+PublishPort=127.0.0.1:5432:5432
+# host-gateway lets the container reach services running directly on your
+# host machine (e.g. a local Mailpit/MinIO instance) by hostname.
+AddHost=<your-mail-dev-domain>:host-gateway
+AddHost=<your-minio-dev-domain>:host-gateway
+
+[Install]
+WantedBy=default.target

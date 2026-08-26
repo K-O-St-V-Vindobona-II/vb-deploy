@@ -1,5 +1,5 @@
 [Unit]
-Description=VB API Backend (Prod)
+Description=VB API Backend ({{ app_environment }})
 After=vb-api-pg.service
 
 [Container]
@@ -8,10 +8,14 @@ Pod=vb-api.pod
 Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
 AutoUpdate=registry
 EnvironmentFile=%h/.env/vb-api.env
-# Optional: AWS-Credentials fuer den Prod-Downsync-Job. Bleibt bewusst
-# ausserhalb des Vault-Systems (manuell auf dem Host abgelegt) - das
-# fuehrende "-" macht die Datei optional, ihr Fehlen ist kein Fehler.
+{% if app_environment != 'production' %}
+# Optional: AWS credentials for the non-prod downsync job/script. The
+# leading "-" makes the file optional - its absence is not an error.
+# Intentionally omitted on production: build_prod_storage() refuses to
+# run there regardless, but this way the real prod AWS keys never even
+# enter the production backend's environment in the first place.
 EnvironmentFile=-%h/.env/vb-api-aws-prod.env
+{% endif %}
 
 HealthCmd=python3 -c 'import urllib.request; urllib.request.urlopen("http://localhost:8000/")'
 HealthInterval=30s

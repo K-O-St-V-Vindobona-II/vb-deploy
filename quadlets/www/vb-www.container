@@ -6,6 +6,7 @@ ContainerName=vb-www
 Pod=vb-www.pod
 Image=ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
 AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-www.env
 
 HealthCmd=wget -qO- http://127.0.0.1/ || exit 1
 HealthInterval=30s

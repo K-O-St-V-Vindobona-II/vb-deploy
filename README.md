@@ -229,12 +229,6 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
 4. `playbooks/setup_vps.yml`, dann `playbooks/deploy.yml`, jeweils mit
    `-i inventory/<stage>.ini` (siehe [Phase 1](#phase-1--vps-grundkonfiguration-nur-bei-neuaufsetzung-nötig)/[Phase 2](#phase-2--tag-2-betrieb)).
 
-**Caveat vb-www:** `vb-www` liefert aktuell nur ein einziges `:latest`-Image
-mit fest zur Build-Zeit eingebranntem `VITE_API_BASE_URL=https://api.vindobona2.at/api`.
-Eine test-/qa-Stage startet `vb-www` zwar problemlos, die Instanz spricht
-dabei aber weiterhin mit der **Produktions-API**, bis die `vb-www`-CI/CD-Pipeline
-selbst stage-spezifische Images baut — das ist nicht Teil dieses Refactorings.
-
 ## Phase 1 — VPS-Grundkonfiguration (nur bei Neuaufsetzung nötig)
 
 ```bash

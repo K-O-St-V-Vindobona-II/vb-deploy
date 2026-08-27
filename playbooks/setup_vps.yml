@@ -120,6 +120,7 @@
       ansible.builtin.command: podman --version
       register: podman_version_check
       changed_when: false
+      check_mode: false
 
     - name: Extract Podman major version
       ansible.builtin.set_fact:

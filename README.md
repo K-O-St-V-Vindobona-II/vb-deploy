@@ -227,11 +227,21 @@ that. `playbooks/deploy.yml` refuses any other value via an `assert` task.
    Caddy basic-auth hash) — SMTP, S3, and `GOOGLE_CLIENT_ID` values are
    deliberately empty, since no real mail server/S3 storage exists yet for
    this stage. Fill them in before production use (see
-   [Maintaining Secrets](#maintaining-secrets)).
+   [Maintaining Secrets](#maintaining-secrets)). If this stage should be
+   able to pull real production data (the "Downsync now" button/nightly
+   job), the same file also takes `AWS_ACCESS_KEY_ID`/
+   `AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION` — a read-only IAM
+   user scoped to the prod bucket only, distinct from the `S3_*` fields
+   above (which target this stage's own bucket). No manual, out-of-band
+   file involved; it's vault-encrypted like everything else here.
 3. Set DNS for the three domains of this stage (see
    [Prerequisites](#prerequisites) above).
 4. `playbooks/setup_vps.yml`, then `playbooks/deploy.yml`, each with
    `-i inventory/<stage>.ini` (see [Phase 1](#phase-1--vps-base-configuration-only-needed-for-a-fresh-setup)/[Phase 2](#phase-2--day-2-operations)).
+
+Which Git workflow to use for steps 1-2 depends on whether the stage is
+meant to last — see [Git Workflow for a New Stage](#git-workflow-for-a-new-stage)
+below.
 
 ## Phase 1 — VPS Base Configuration (only needed for a fresh setup)
 
@@ -273,6 +283,34 @@ or `.env.j2`. For `.env.j2` files (domain-/stage-dependent content, see
 then Jinja2 templating of the domain/stage variables —
 `ansible.builtin.template` automatically decrypts a vault file as it reads
 it, so there's no ordering collision between vault and templating.
+
+**`.example` templates vs. real files:** every stage directory under
+`secrets/` (`production/`, `test/`, `qa/`) carries the same five `.example`
+templates (`caddy.env.example`, `vb-api.env.j2.example`,
+`vb-api-pg.env.example`, `vb-intern.env.j2.example`,
+`vb-www.env.j2.example`), independent of that stage's provisioning status —
+they document the target structure, not the current rollout state. The
+real, vault-encrypted files (`caddy.env`, `vb-api.env.j2`, ...) exist only
+for stages that actually have a host behind them; a stage still at the
+"Skeleton, no dedicated VPS yet" status (see [Stages](#stages)) only has
+the templates, not the real files, until it is actually set up.
+
+### Git Workflow for a New Stage
+
+Which branch a new stage's `inventory/<stage>.ini` and `secrets/<stage>/`
+changes land on depends on whether the stage is meant to last:
+
+- **Permanent stage** (a real, ongoing environment, like `test`/`qa`/
+  `production`): commit directly to `development`, exactly like
+  `production`'s secrets.
+- **Throwaway smoke test** of the deploy pipeline itself (verifying
+  `setup_vps.yml`/`deploy.yml` end-to-end against a disposable VPS, not
+  meant to become a lasting stage): do it all on a temporary branch that is
+  **never merged and never pushed** —
+  `git checkout -b <stage>-smoketest-YYYY-MM-DD` — then
+  `git branch -D <stage>-smoketest-YYYY-MM-DD` once the test is done. This
+  keeps real hostnames and secrets for a host that won't exist tomorrow out
+  of `development`'s history entirely.
 
 ## Phase 2 — Day-2 Operations
 
@@ -689,11 +727,23 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
    Caddy-Basic-Auth-Hash) — SMTP-, S3- und `GOOGLE_CLIENT_ID`-Werte sind
    bewusst leer, da für diese Stage noch kein echter Mailserver/S3-Storage
    existiert. Vor dem produktiven Einsatz ergänzen (siehe
-   [Secrets pflegen](#secrets-pflegen)).
+   [Secrets pflegen](#secrets-pflegen)). Falls diese Stage echte
+   Produktionsdaten ziehen können soll (Button "Downsync jetzt
+   durchführen"/nächtlicher Job): dieselbe Datei nimmt zusätzlich
+   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION`
+   auf — ein rein lesender IAM-User, nur auf den Prod-Bucket beschränkt,
+   getrennt von den `S3_*`-Werten oben (die die eigene Storage dieser
+   Stage ansprechen). Kein manueller Out-of-Band-Schritt nötig — genauso
+   vault-verschlüsselt wie alles andere hier.
 3. DNS für die drei Domains dieser Stage setzen (siehe
    [Voraussetzungen](#voraussetzungen) oben).
 4. `playbooks/setup_vps.yml`, dann `playbooks/deploy.yml`, jeweils mit
    `-i inventory/<stage>.ini` (siehe [Phase 1](#phase-1--vps-grundkonfiguration-nur-bei-neuaufsetzung-nötig)/[Phase 2](#phase-2--tag-2-betrieb)).
+
+Welcher Git-Workflow für die Schritte 1-2 gilt, hängt davon ab, ob die
+Stage dauerhaft bestehen bleiben soll — siehe
+[Git-Workflow für eine neue Stage](#git-workflow-für-eine-neue-stage)
+unten.
 
 ## Phase 1 — VPS-Grundkonfiguration (nur bei Neuaufsetzung nötig)
 
@@ -736,6 +786,37 @@ Vault-Entschlüsselung, danach das Jinja2-Templating der
 Domain-/Stage-Variablen — `ansible.builtin.template` entschlüsselt eine
 Vault-Datei beim Lesen automatisch mit, es gibt also keine
 Reihenfolge-Kollision zwischen Vault und Templating.
+
+**`.example`-Vorlagen vs. echte Dateien:** Jedes Stage-Verzeichnis unter
+`secrets/` (`production/`, `test/`, `qa/`) führt dieselben fünf
+`.example`-Vorlagen (`caddy.env.example`, `vb-api.env.j2.example`,
+`vb-api-pg.env.example`, `vb-intern.env.j2.example`,
+`vb-www.env.j2.example`) — unabhängig vom Provisionierungsstatus dieser
+Stage. Sie dokumentieren die Zielstruktur, nicht den aktuellen
+Rollout-Stand. Die echten, vault-verschlüsselten Dateien (`caddy.env`,
+`vb-api.env.j2`, ...) existieren nur für Stages, die tatsächlich einen
+Host dahinter haben; eine Stage im Status "Skeleton, noch kein eigener
+VPS" (siehe [Stages](#stages-1)) hat nur die Vorlagen, keine echten
+Dateien, bis sie tatsächlich aufgesetzt wird.
+
+### Git-Workflow für eine neue Stage
+
+Auf welchem Branch die Änderungen an `inventory/<stage>.ini` und
+`secrets/<stage>/` für eine neue Stage landen, hängt davon ab, ob die
+Stage dauerhaft bestehen bleiben soll:
+
+- **Dauerhafte Stage** (eine echte, fortlaufende Umgebung wie `test`/`qa`/
+  `production`): Commit direkt auf `development`, genau wie bei
+  `production`s Secrets.
+- **Reiner Wegwerf-Smoke-Test** der Deploy-Pipeline selbst (Verifikation
+  von `setup_vps.yml`/`deploy.yml` end-to-end gegen einen Wegwerf-VPS, der
+  keine dauerhafte Stage werden soll): alles auf einem temporären Branch,
+  der **nie gemergt und nie gepusht** wird —
+  `git checkout -b <stage>-smoketest-YYYY-MM-DD` — danach
+  `git branch -D <stage>-smoketest-YYYY-MM-DD`, sobald der Test
+  abgeschlossen ist. So landen echte Hostnamen und Secrets für einen Host,
+  der morgen schon wieder weg ist, gar nicht erst in developments
+  History.
 
 ## Phase 2 — Tag-2-Betrieb
 

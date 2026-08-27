@@ -56,6 +56,12 @@
               - uidmap
               - dbus-user-session
               - passt
+              # Only a Recommends of the podman package, not a hard Depends -
+              # silently missing on any image with APT::Install-Recommends
+              # disabled (common on minimal cloud images), which then makes
+              # every "podman pod create" fail ("finding pause binary: exec:
+              # \"catatonit\": executable file not found in $PATH").
+              - catatonit
               - curl
               - tar
             state: present

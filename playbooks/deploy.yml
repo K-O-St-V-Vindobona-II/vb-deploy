@@ -26,8 +26,12 @@
     local_quadlets_path: "../quadlets"
     local_timers_path: "../systemd-timers"
     local_caddyfile_template: "../config/caddy/Caddyfile.j2"
+    local_api_pod_template: "../templates/vb-api.pod.j2"
     local_api_quadlet_template: "../templates/vb-api.container.j2"
     local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
+    local_minio_quadlet_template: "../templates/vb-minio.container.j2"
+    local_intern_quadlet_template: "../templates/vb-intern.container.j2"
+    local_www_quadlet_template: "../templates/vb-www.container.j2"
 
     remote_env_dir: "{{ ansible_user_dir }}/.env"
     remote_quadlet_base: "{{ ansible_user_dir }}/.config/containers/systemd"
@@ -35,14 +39,16 @@
     remote_caddy_config_dir: "{{ ansible_user_dir }}/.config/vb/infrastructure/caddy"
     xdg_runtime_dir: "/run/user/{{ ansible_facts.user_uid }}"
 
-    # Quadlet-Quellordner -> Zielpfad unter remote_quadlet_base.
-    # Zwei gewachsene, bewusst beibehaltene Konventionen: "vb/<name>" fuer
-    # Caddy/Maintenance/Logging, "vindobona2.at/<name>" fuer die drei Apps.
+    # Quadlet-Quellordner -> Zielpfad unter remote_quadlet_base, fuer die
+    # noch verbliebenen STATISCHEN Quadlet-Dateien (kein Jinja2-Templating
+    # noetig). "api" ist bewusst NICHT mehr dabei: vb-api.pod, vb-api.container
+    # und vb-api-pg.container sind mittlerweile alle drei Templates (Domain-/
+    # Stage-/MinIO-abhaengig) - siehe die eigenen Render-Tasks weiter unten,
+    # inkl. der eigenen "vindobona2.at/api"-Verzeichnis-Erstellung dort.
     quadlet_targets:
       - { src: caddy, dest: "vb/infrastructure/caddy" }
       - { src: maintenance, dest: "vb/infrastructure/maintenance" }
       - { src: logging, dest: "vb/logging" }
-      - { src: api, dest: "vindobona2.at/api" }
       - { src: intern, dest: "vindobona2.at/intern" }
       - { src: www, dest: "vindobona2.at/www" }
 
@@ -53,13 +59,14 @@
     # zuvor fehlgeschlagene Abhaengigkeit (z.B. vb-api-pg.service)
     # bleibt "failed" haengen, statt erneut versucht zu werden. Deshalb
     # explizit auflisten statt auf die Pod-Abhaengigkeit zu vertrauen.
-    managed_units:
-      - caddy.service
-      - logging-dozzle.service
-      - vb-api-pg.service
-      - vb-api.service
-      - vb-intern.service
-      - vb-www.service
+    # vb-minio nur auf Non-Production-Stages, siehe quadlet_targets oben.
+    managed_units: >-
+      {{
+        [
+          'caddy.service', 'logging-dozzle.service', 'vb-api-pg.service',
+          'vb-api.service', 'vb-intern.service', 'vb-www.service',
+        ] + (['vb-minio.service'] if app_environment != 'production' else [])
+      }}
 
   tasks:
     # ------------------------------------------------------------------
@@ -91,6 +98,34 @@
         path: "{{ item }}"
         state: directory
         mode: "0700"
+
+    - name: MinIO-Datenverzeichnis anlegen (nur Non-Production, siehe README)
+      when: app_environment != 'production'
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/minio"
+        state: directory
+        mode: "0700"
+
+    # Rootless-Podman-Mapping-Fix: ein frisch angelegtes Verzeichnis gehoert
+    # "service" im normalen UID-Namespace, der Container sieht darin aber
+    # seinen eigenen "postgres"-User (UID 999) in einem gemappten Namespace -
+    # ohne diesen Fix scheitert initdb beim allerersten Start mit
+    # "Permission denied" (empirisch verifiziert, siehe README). Beide
+    # Befehle muessen unter podman unshare laufen, nicht nur der chown -
+    # danach gehoert das Verzeichnis der gemappten UID, "service" selbst
+    # kann es von aussen nicht mehr anfassen. Auf bereits initialisierten
+    # Verzeichnissen ein no-op (chown/chmod sind idempotent).
+    - name: Postgres-Datenverzeichnis-Ownership sicherstellen (rootless-Mapping)
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
+
+    - name: Postgres-Datenverzeichnis-Permissions sicherstellen
+      ansible.builtin.command: >-
+        podman unshare chmod 700
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
 
     # ------------------------------------------------------------------
     # 2. Secrets verteilen (ansible-vault-verschluesselt im Repo,
@@ -166,7 +201,19 @@
         dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
         mode: "0644"
 
-    - name: API-Quadlet rendern (AWS-Prod-EnvironmentFile nur ausserhalb production)
+    - name: vindobona2.at/api-Verzeichnis anlegen (nur Templates, kein statischer Copy-Task dafuer)
+      ansible.builtin.file:
+        path: "{{ remote_quadlet_base }}/vindobona2.at/api"
+        state: directory
+        mode: "0755"
+
+    - name: API-Pod rendern (Domain kommt aus app_environment, MinIO-Ports nur Non-Production)
+      ansible.builtin.template:
+        src: "{{ local_api_pod_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.pod"
+        mode: "0644"
+
+    - name: API-Quadlet rendern
       ansible.builtin.template:
         src: "{{ local_api_quadlet_template }}"
         dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.container"
@@ -176,6 +223,25 @@
       ansible.builtin.template:
         src: "{{ local_pg_quadlet_template }}"
         dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-pg.container"
+        mode: "0644"
+
+    - name: MinIO-Quadlet rendern (nur Non-Production; teilt sich vb-api.pod, siehe Pod-Netzwerk-Kommentar dort)
+      when: app_environment != 'production'
+      ansible.builtin.template:
+        src: "{{ local_minio_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-minio.container"
+        mode: "0644"
+
+    - name: Intern-Quadlet rendern (Description zeigt echte Stage statt hartcodiert "Prod")
+      ansible.builtin.template:
+        src: "{{ local_intern_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/intern/vb-intern.container"
+        mode: "0644"
+
+    - name: www-Quadlet rendern (Description zeigt echte Stage statt hartcodiert "Prod")
+      ansible.builtin.template:
+        src: "{{ local_www_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/www/vb-www.container"
         mode: "0644"
 
     - name: Systemd-Timer kopieren (kein Quadlet, eigener Zielpfad)

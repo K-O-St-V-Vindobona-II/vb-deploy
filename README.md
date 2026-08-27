@@ -193,8 +193,15 @@ empty database (no members, no data).
   automatically by `setup_vps.yml` on the first run), otherwise use
   `--ask-pass` (SSH login password) or `--ask-become-pass` (`sudo`
   password for `admin`).
-- A vault password for `secrets/<stage>/*` (asked interactively, no
-  `vault_password_file` deposited in the repo).
+- **`sshpass` installed locally** — Ansible's `ssh` connection plugin
+  needs it for any password-based auth (`--ask-pass`/`--ask-become-pass`),
+  including the very first `root` login above; without it, those flags
+  fail outright rather than prompting.
+- A vault password for `secrets/<stage>/*` — normally asked interactively
+  via `--ask-vault-pass`. For non-interactive/scripted runs, pass
+  `--vault-password-file <path>` instead (any file containing just the
+  password); keep that file outside the repo and out of git entirely, the
+  same way `.vault_pass` is handled in this project.
 - **DNS**: all three domains of the respective stage (e.g.
   `api.vindobona2.at`, `intern.vindobona2.at`, `www.vindobona2.at` for
   production) must already point to the target VPS via A/AAAA record
@@ -205,6 +212,12 @@ empty database (no members, no data).
   request fails. That means a complete outage for all three apps (Caddy
   needs the certificate to terminate HTTPS at all) and the risk of hitting
   Let's Encrypt's rate limits on repeated failed attempts.
+- **Disk space on non-production stages:** these run their own MinIO
+  instance (see [MinIO on Non-Production Stages](#minio-on-non-production-stages)
+  below) to hold a full downsynced mirror of the production S3 bucket.
+  That mirror alone is currently (2026-08-27) ~41GB and only grows over
+  time — provision at least ~50GB free for `~/data/vb/<stage>/minio` on
+  any `test`/`qa` VPS, on top of the OS/Postgres footprint.
 
 ## Stages
 
@@ -220,24 +233,39 @@ that. `playbooks/deploy.yml` refuses any other value via an `assert` task.
 
 ### Setting Up a New Stage (test/qa)
 
-1. Fill in `inventory/<stage>.ini`: enter the real hostname and the three
-   real domains instead of the `CHANGEME.example.invalid` placeholders.
+1. Fill in `inventory/<stage>.ini`: enter the real hostname and all **four**
+   domains instead of the `CHANGEME.example.invalid` placeholders — the
+   usual `api`/`intern`/`www` plus `storage_domain` (MinIO's S3 API, see
+   [MinIO on Non-Production Stages](#minio-on-non-production-stages)
+   below).
 2. `secrets/<stage>/` already exists as a skeleton with independently,
    freshly generated required values (`SECRET_KEY`, Postgres password,
-   Caddy basic-auth hash) — SMTP, S3, and `GOOGLE_CLIENT_ID` values are
-   deliberately empty, since no real mail server/S3 storage exists yet for
-   this stage. Fill them in before production use (see
-   [Maintaining Secrets](#maintaining-secrets)). If this stage should be
-   able to pull real production data (the "Downsync now" button/nightly
-   job), the same file also takes `AWS_ACCESS_KEY_ID`/
+   Caddy basic-auth hash, this stage's own MinIO root credentials) — this
+   stage's storage is its own MinIO instance, already fully wired up, not
+   real AWS S3. SMTP and `GOOGLE_CLIENT_ID` values are deliberately empty,
+   since no real mail server/OAuth app exists yet for this stage. Fill
+   them in before production use (see
+   [Maintaining Secrets](#maintaining-secrets), which also has the full
+   [required-variables table](#required-env-variables-per-stage-type)).
+   The same file also already takes `AWS_ACCESS_KEY_ID`/
    `AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION` — a read-only IAM
-   user scoped to the prod bucket only, distinct from the `S3_*` fields
-   above (which target this stage's own bucket). No manual, out-of-band
-   file involved; it's vault-encrypted like everything else here.
-3. Set DNS for the three domains of this stage (see
+   user scoped to the **prod** bucket only, distinct from the `S3_*`
+   fields above (which target this stage's own MinIO). No manual,
+   out-of-band file involved; it's vault-encrypted like everything else
+   here.
+3. Set DNS for all four domains of this stage (see
    [Prerequisites](#prerequisites) above).
 4. `playbooks/setup_vps.yml`, then `playbooks/deploy.yml`, each with
    `-i inventory/<stage>.ini` (see [Phase 1](#phase-1--vps-base-configuration-only-needed-for-a-fresh-setup)/[Phase 2](#phase-2--day-2-operations)).
+   This also brings up the stage's own MinIO and fixes the Postgres
+   data-directory ownership automatically — no manual steps needed.
+5. To see real data instead of an empty database: trigger a downsync —
+   either the "Downsync now" button in `vb-intern` (System → Scheduler),
+   or `podman exec vb-api python scripts/downsync_prod.py --yes` over SSH
+   (see [Operational Scripts](#operational-scripts-in-vb-api)). Mirrors
+   the full production S3 bucket into this stage's MinIO and restores the
+   local database from it — see the disk space note in
+   [Prerequisites](#prerequisites).
 
 Which Git workflow to use for steps 1-2 depends on whether the stage is
 meant to last — see [Git Workflow for a New Stage](#git-workflow-for-a-new-stage)
@@ -285,15 +313,88 @@ then Jinja2 templating of the domain/stage variables —
 it, so there's no ordering collision between vault and templating.
 
 **`.example` templates vs. real files:** every stage directory under
-`secrets/` (`production/`, `test/`, `qa/`) carries the same five `.example`
-templates (`caddy.env.example`, `vb-api.env.j2.example`,
+`secrets/` carries `.example` templates for whichever files apply to that
+stage type, independent of that stage's provisioning status — they
+document the target structure, not the current rollout state. Five files
+are shared by every stage (`caddy.env.example`, `vb-api.env.j2.example`,
 `vb-api-pg.env.example`, `vb-intern.env.j2.example`,
-`vb-www.env.j2.example`), independent of that stage's provisioning status —
-they document the target structure, not the current rollout state. The
-real, vault-encrypted files (`caddy.env`, `vb-api.env.j2`, ...) exist only
-for stages that actually have a host behind them; a stage still at the
-"Skeleton, no dedicated VPS yet" status (see [Stages](#stages)) only has
-the templates, not the real files, until it is actually set up.
+`vb-www.env.j2.example`); `vb-minio.env.j2.example` exists only under
+`test/`/`qa/` (production uses real AWS S3 instead, see
+[MinIO on Non-Production Stages](#minio-on-non-production-stages) below).
+The real, vault-encrypted files exist only for stages that actually have a
+host behind them; a stage still at the "Skeleton, no dedicated VPS yet"
+status (see [Stages](#stages)) only has the templates, not the real
+files, until it is actually set up.
+
+### Required `.env` Variables per Stage Type
+
+Which variables actually need a real value differs between production
+(real AWS S3/SMTP/Google) and `test`/`qa` (own MinIO, no mail server/OAuth
+app by default). "Optional" means the setting has a working default in
+`app/core/config.py` if left unset.
+
+| File | Variable(s) | Production | `test`/`qa` |
+|---|---|---|---|
+| `caddy.env` | `LOGGING_USER`, `LOGGING_PASSWORD_HASH` | required | required |
+| `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | required | required |
+| `vb-api.env.j2` | `SECRET_KEY` | required | required |
+| `vb-api.env.j2` | `DATABASE_URL` | required | required |
+| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | required (real AWS credentials) | required (this stage's MinIO root credentials) |
+| `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | not set (defaults to real AWS) | required (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
+| `vb-api.env.j2` | `S3_REGION` | required (`eu-central-1`) | optional (MinIO ignores it; `us-east-1` default) |
+| `vb-api.env.j2` | `S3_PATH_*` | optional (sensible defaults) | optional (sensible defaults) |
+| `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | not applicable (downsync refuses to run on production) | required for the downsync job/button (read-only prod-bucket credentials) |
+| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | required (`true` + a real schedule) | optional (`false` — a disposable stage's own backups have little value) |
+| `vb-api.env.j2` | `SMTP_*` | required (real mail delivery) | not set (no mail server for this stage) |
+| `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | required (Google Login) | not set (no OAuth app for this stage) |
+| `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | required | not set |
+| `vb-minio.env.j2` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | file doesn't exist on production | required |
+
+### MinIO on Non-Production Stages
+
+`test`/`qa` run their own [MinIO](https://min.io/) instance as an
+S3-compatible stand-in for real AWS S3 — production keeps using the real
+`vindobona2-at` AWS bucket directly, it never runs MinIO. MinIO joins
+`vb-api`'s own pod (`templates/vb-api.pod.j2` — its `Wants=`/`Before=` on
+`vb-minio.service` and its two published MinIO ports only appear outside
+production) rather than getting a pod of its own — exactly like the
+existing `vb-api-pg` Postgres container, it shares `vb-api`'s network
+namespace, so `vb-api` reaches it over plain `localhost`. This is not
+just convenience: internal `vb-api`↔MinIO traffic **must** stay inside
+that shared pod network and never round-trip through Caddy/the public
+internet. A separate pod would only be reachable from another pod via its
+public domain — rootless Podman's `pasta` networking gives every pod its
+own private loopback, so `127.0.0.1` from one pod cannot reach a
+`127.0.0.1`-bound port published by a *different* pod on the same host,
+and routing server-side traffic through the public domain instead fails
+the same way (self-referential public IP, no hairpin NAT here).
+`templates/vb-minio.container.j2` (the data-directory path depends on the
+stage, exactly like Postgres's own volume) carries `Pod=vb-api.pod`
+accordingly. `vb-api`'s own `StorageClient` creates the `vindobona2-at`
+bucket inside MinIO on first access if it doesn't exist yet
+(`ensure_bucket_exists()`, only outside production) — no manual bucket
+setup needed.
+
+**Two ports, two very different exposure levels:**
+- **9000 (S3 API) — public, behind Caddy+TLS on `storage_domain`.**
+  `generate_presigned_url()` produces links the end-user's *browser*
+  fetches directly (profile images, archive downloads, gallery pictures) —
+  those can't resolve `127.0.0.1`, so the API port has to be genuinely
+  internet-reachable, same as `api`/`intern`/`www`. `vb-api` itself never
+  uses that public route: it talks to MinIO over the shared pod network
+  (`S3_ENDPOINT_URL=http://127.0.0.1:9000`, see above);
+  `S3_PUBLIC_ENDPOINT_URL` is the one presigned URLs actually use.
+- **9001 (web console) — loopback-only, no Caddy route.** Rarely needed
+  (if ever, once right after setup) — reach it via an SSH tunnel instead
+  of carrying a permanent public endpoint and its own basic-auth secret
+  for something this infrequently used:
+  ```bash
+  ssh -L 9001:localhost:9001 service@<stage-host>
+  # then open http://localhost:9001 in your own browser
+  ```
+
+**Disk space:** see [Prerequisites](#prerequisites) above — a downsynced
+mirror of the full production bucket is currently ~41GB and only grows.
 
 ### Git Workflow for a New Stage
 
@@ -690,8 +791,16 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
   `setup_vps.yml` beim Erstlauf automatisch eingerichtet), sonst
   `--ask-pass` (SSH-Login-Passwort) bzw. `--ask-become-pass`
   (`sudo`-Passwort für `admin`) verwenden.
-- Ein Vault-Passwort für `secrets/<stage>/*` (wird interaktiv abgefragt, kein
-  `vault_password_file` im Repo hinterlegt).
+- **`sshpass` lokal installiert** — Ansibles `ssh`-Connection-Plugin
+  braucht es für jede passwortbasierte Auth (`--ask-pass`/
+  `--ask-become-pass`), auch für den allerersten `root`-Login oben; ohne
+  `sshpass` schlagen diese Flags direkt fehl, statt nach dem Passwort zu
+  fragen.
+- Ein Vault-Passwort für `secrets/<stage>/*` — normalerweise interaktiv per
+  `--ask-vault-pass` abgefragt. Für nicht-interaktive/automatisierte Läufe
+  stattdessen `--vault-password-file <pfad>` verwenden (eine Datei, die nur
+  das Passwort enthält); diese Datei genau wie `.vault_pass` in diesem
+  Projekt außerhalb des Repos und komplett außerhalb von Git halten.
 - **DNS**: Alle drei Domains der jeweiligen Stage (z. B. `api.vindobona2.at`,
   `intern.vindobona2.at`, `www.vindobona2.at` für Production) müssen bereits
   **vor** dem ersten `deploy.yml`-Lauf per A-/AAAA-Record auf den Ziel-VPS
@@ -702,6 +811,13 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
   Komplettausfall für alle drei Apps (Caddy braucht das Zertifikat, um
   überhaupt HTTPS zu terminieren) und das Risiko, bei wiederholten
   Fehlversuchen Let's-Encrypts Rate-Limits zu treffen.
+- **Plattenplatz auf Non-Production-Stages:** Diese betreiben eine eigene
+  MinIO-Instanz (siehe [MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+  unten), um einen vollständigen, per Downsync gespiegelten Stand des
+  Produktions-S3-Buckets aufzunehmen. Allein dieser Spiegel ist aktuell
+  (27.08.2026) ~41GB groß und wächst mit der Zeit weiter — für
+  `~/data/vb/<stage>/minio` auf jedem `test`/`qa`-VPS mindestens ~50GB
+  frei einplanen, zusätzlich zum OS-/Postgres-Bedarf.
 
 ## Stages
 
@@ -717,25 +833,42 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
 
 ### Neue Stage einrichten (test/qa)
 
-1. `inventory/<stage>.ini` befüllen: echten Hostnamen und die drei echten
-   Domains eintragen statt der `CHANGEME.example.invalid`-Platzhalter.
+1. `inventory/<stage>.ini` befüllen: echten Hostnamen und alle **vier**
+   Domains eintragen statt der `CHANGEME.example.invalid`-Platzhalter —
+   die üblichen `api`/`intern`/`www` plus `storage_domain` (MinIOs
+   S3-API, siehe [MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+   unten).
 2. `secrets/<stage>/` existiert bereits als Skeleton mit unabhängig frisch
    generierten Pflichtwerten (`SECRET_KEY`, Postgres-Passwort,
-   Caddy-Basic-Auth-Hash) — SMTP-, S3- und `GOOGLE_CLIENT_ID`-Werte sind
-   bewusst leer, da für diese Stage noch kein echter Mailserver/S3-Storage
-   existiert. Vor dem produktiven Einsatz ergänzen (siehe
-   [Secrets pflegen](#secrets-pflegen)). Falls diese Stage echte
-   Produktionsdaten ziehen können soll (Button "Downsync jetzt
-   durchführen"/nächtlicher Job): dieselbe Datei nimmt zusätzlich
+   Caddy-Basic-Auth-Hash, den eigenen MinIO-Root-Credentials dieser
+   Stage) — die Storage dieser Stage ist ihre eigene, bereits fertig
+   verdrahtete MinIO-Instanz, kein echtes AWS S3. SMTP- und
+   `GOOGLE_CLIENT_ID`-Werte sind bewusst leer, da für diese Stage noch
+   kein echter Mailserver/OAuth-App existiert. Vor dem produktiven
+   Einsatz ergänzen (siehe [Secrets pflegen](#secrets-pflegen), dort auch
+   die vollständige
+   [Tabelle der Pflichtvariablen](#pflicht-env-variablen-je-stage-typ)).
+   Dieselbe Datei nimmt außerdem bereits
    `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION`
-   auf — ein rein lesender IAM-User, nur auf den Prod-Bucket beschränkt,
-   getrennt von den `S3_*`-Werten oben (die die eigene Storage dieser
-   Stage ansprechen). Kein manueller Out-of-Band-Schritt nötig — genauso
-   vault-verschlüsselt wie alles andere hier.
-3. DNS für die drei Domains dieser Stage setzen (siehe
+   auf — ein rein lesender IAM-User, nur auf den **Prod**-Bucket
+   beschränkt, getrennt von den `S3_*`-Werten oben (die das eigene MinIO
+   dieser Stage ansprechen). Kein manueller Out-of-Band-Schritt nötig —
+   genauso vault-verschlüsselt wie alles andere hier.
+3. DNS für alle vier Domains dieser Stage setzen (siehe
    [Voraussetzungen](#voraussetzungen) oben).
 4. `playbooks/setup_vps.yml`, dann `playbooks/deploy.yml`, jeweils mit
    `-i inventory/<stage>.ini` (siehe [Phase 1](#phase-1--vps-grundkonfiguration-nur-bei-neuaufsetzung-nötig)/[Phase 2](#phase-2--tag-2-betrieb)).
+   Das bringt auch das eigene MinIO dieser Stage hoch und behebt die
+   Postgres-Datenverzeichnis-Ownership automatisch — keine manuellen
+   Schritte nötig.
+5. Um echte Daten statt einer leeren Datenbank zu sehen: einen Downsync
+   auslösen — entweder Button "Downsync jetzt durchführen" in
+   `vb-intern` (System → Scheduler), oder `podman exec vb-api python
+   scripts/downsync_prod.py --yes` per SSH (siehe
+   [Operative Skripte](#operative-skripte-in-vb-api)). Spiegelt den
+   kompletten Produktions-S3-Bucket in das MinIO dieser Stage und
+   restored die lokale Datenbank daraus — siehe den
+   Plattenplatz-Hinweis in [Voraussetzungen](#voraussetzungen).
 
 Welcher Git-Workflow für die Schritte 1-2 gilt, hängt davon ab, ob die
 Stage dauerhaft bestehen bleiben soll — siehe
@@ -785,16 +918,94 @@ Vault-Datei beim Lesen automatisch mit, es gibt also keine
 Reihenfolge-Kollision zwischen Vault und Templating.
 
 **`.example`-Vorlagen vs. echte Dateien:** Jedes Stage-Verzeichnis unter
-`secrets/` (`production/`, `test/`, `qa/`) führt dieselben fünf
-`.example`-Vorlagen (`caddy.env.example`, `vb-api.env.j2.example`,
+`secrets/` führt `.example`-Vorlagen für die Dateien, die für diesen
+Stage-Typ gelten — unabhängig vom Provisionierungsstatus dieser Stage. Sie
+dokumentieren die Zielstruktur, nicht den aktuellen Rollout-Stand. Fünf
+Dateien gelten für jede Stage (`caddy.env.example`, `vb-api.env.j2.example`,
 `vb-api-pg.env.example`, `vb-intern.env.j2.example`,
-`vb-www.env.j2.example`) — unabhängig vom Provisionierungsstatus dieser
-Stage. Sie dokumentieren die Zielstruktur, nicht den aktuellen
-Rollout-Stand. Die echten, vault-verschlüsselten Dateien (`caddy.env`,
-`vb-api.env.j2`, ...) existieren nur für Stages, die tatsächlich einen
-Host dahinter haben; eine Stage im Status "Skeleton, noch kein eigener
-VPS" (siehe [Stages](#stages-1)) hat nur die Vorlagen, keine echten
-Dateien, bis sie tatsächlich aufgesetzt wird.
+`vb-www.env.j2.example`); `vb-minio.env.j2.example` existiert nur unter
+`test/`/`qa/` (Production nutzt echtes AWS S3, siehe
+[MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+unten). Die echten, vault-verschlüsselten Dateien existieren nur für
+Stages, die tatsächlich einen Host dahinter haben; eine Stage im Status
+"Skeleton, noch kein eigener VPS" (siehe [Stages](#stages-1)) hat nur die
+Vorlagen, keine echten Dateien, bis sie tatsächlich aufgesetzt wird.
+
+### Pflicht-`.env`-Variablen je Stage-Typ
+
+Welche Variablen wirklich einen echten Wert brauchen, unterscheidet sich
+zwischen Production (echtes AWS S3/SMTP/Google) und `test`/`qa` (eigenes
+MinIO, standardmäßig kein Mailserver/keine OAuth-App). "Optional" heißt:
+Der Wert hat in `app/core/config.py` einen funktionierenden Default, falls
+er leer bleibt.
+
+| Datei | Variable(n) | Production | `test`/`qa` |
+|---|---|---|---|
+| `caddy.env` | `LOGGING_USER`, `LOGGING_PASSWORD_HASH` | Pflicht | Pflicht |
+| `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Pflicht | Pflicht |
+| `vb-api.env.j2` | `SECRET_KEY` | Pflicht | Pflicht |
+| `vb-api.env.j2` | `DATABASE_URL` | Pflicht | Pflicht |
+| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | Pflicht (echte AWS-Credentials) | Pflicht (MinIO-Root-Credentials dieser Stage) |
+| `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | nicht gesetzt (Default: echtes AWS) | Pflicht (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
+| `vb-api.env.j2` | `S3_REGION` | Pflicht (`eu-central-1`) | optional (MinIO ignoriert es; Default `us-east-1`) |
+| `vb-api.env.j2` | `S3_PATH_*` | optional (sinnvolle Defaults) | optional (sinnvolle Defaults) |
+| `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | nicht zutreffend (Downsync verweigert sich auf Production) | Pflicht für Downsync-Job/-Button (rein lesende Prod-Bucket-Credentials) |
+| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | Pflicht (`true` + echter Zeitplan) | optional (`false` — eigene Backups einer Wegwerf-Stage haben wenig Wert) |
+| `vb-api.env.j2` | `SMTP_*` | Pflicht (echter Mailversand) | nicht gesetzt (kein Mailserver für diese Stage) |
+| `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht (Google-Login) | nicht gesetzt (keine OAuth-App für diese Stage) |
+| `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht | nicht gesetzt |
+| `vb-minio.env.j2` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Datei existiert auf Production nicht | Pflicht |
+
+### MinIO auf Non-Production-Stages
+
+`test`/`qa` betreiben eine eigene [MinIO](https://min.io/)-Instanz als
+S3-kompatiblen Ersatz für echtes AWS S3 — Production nutzt weiterhin den
+echten `vindobona2-at`-AWS-Bucket direkt, dort läuft nie MinIO. MinIO
+tritt `vb-api`s eigenem Pod bei (`templates/vb-api.pod.j2` — dessen
+`Wants=`/`Before=` auf `vb-minio.service` und die beiden veröffentlichten
+MinIO-Ports erscheinen nur außerhalb Production), statt einen eigenen Pod
+zu bekommen — genau wie der bestehende Postgres-Container `vb-api-pg`
+teilt es sich `vb-api`s Netzwerk-Namespace, wodurch `vb-api` es über
+schlichtes `localhost` erreicht. Das ist keine reine Bequemlichkeit: der
+interne Traffic zwischen `vb-api` und MinIO **muss** innerhalb dieses
+gemeinsamen Pod-Netzwerks bleiben und darf niemals über Caddy/das
+öffentliche Internet umgeleitet werden. Ein eigener Pod wäre von einem
+anderen Pod aus nur über dessen öffentliche Domain erreichbar — rootless
+Podmans `pasta`-Networking gibt jedem Pod ein eigenes, privates Loopback,
+weshalb `127.0.0.1` aus einem Pod heraus keinen `127.0.0.1`-gebundenen
+Port erreicht, den ein *anderer* Pod auf demselben Host veröffentlicht;
+serverseitigen Traffic stattdessen über die öffentliche Domain zu leiten
+scheitert genauso (selbstreferenzielle öffentliche IP, kein Hairpin-NAT
+hier vorhanden). `templates/vb-minio.container.j2` (der
+Datenverzeichnis-Pfad hängt von der Stage ab, genau wie bei Postgres'
+eigenem Volume) trägt entsprechend `Pod=vb-api.pod`. `vb-api`s eigener
+`StorageClient` legt den `vindobona2-at`-Bucket in MinIO beim ersten
+Zugriff selbst an, falls er noch nicht existiert
+(`ensure_bucket_exists()`, nur außerhalb Production) — kein manuelles
+Bucket-Setup nötig.
+
+**Zwei Ports, zwei sehr unterschiedliche Expositionsstufen:**
+- **9000 (S3-API) — öffentlich, hinter Caddy+TLS auf `storage_domain`.**
+  `generate_presigned_url()` erzeugt Links, die der *Browser* der
+  Endnutzer direkt abruft (Profilbilder, Archiv-Downloads,
+  Galerie-Bilder) — die können `127.0.0.1` nicht auflösen, der API-Port
+  muss also echt aus dem Internet erreichbar sein, genau wie
+  `api`/`intern`/`www`. `vb-api` selbst nutzt diese öffentliche Route
+  nie: es spricht MinIO über das gemeinsame Pod-Netzwerk an
+  (`S3_ENDPOINT_URL=http://127.0.0.1:9000`, siehe oben);
+  `S3_PUBLIC_ENDPOINT_URL` ist das, was Presigned URLs tatsächlich nutzen.
+- **9001 (Web-Konsole) — nur lokal, kein Caddy-Routing.** Selten
+  gebraucht (wenn überhaupt, einmal direkt nach dem Aufsetzen) — per
+  SSH-Tunnel erreichen statt dafür einen dauerhaften öffentlichen
+  Endpoint samt eigenem Basic-Auth-Secret vorzuhalten:
+  ```bash
+  ssh -L 9001:localhost:9001 service@<stage-host>
+  # danach http://localhost:9001 im eigenen Browser öffnen
+  ```
+
+**Plattenplatz:** siehe [Voraussetzungen](#voraussetzungen) oben — ein
+per Downsync gespiegelter Stand des kompletten Produktions-Buckets ist
+aktuell ~41GB groß und wächst nur weiter.
 
 ### Git-Workflow für eine neue Stage
 

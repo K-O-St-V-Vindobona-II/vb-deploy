@@ -16,6 +16,18 @@
   become: yes
   vars:
     local_ssh_pub_key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
+    # Alvistack's OBS project doesn't follow one single "{distribution}_
+    # {version}" scheme across distros: real Debian is "Debian_<major>"
+    # (e.g. "Debian_13"), but Ubuntu is "xUbuntu_<major>.<minor>" (e.g.
+    # "xUbuntu_26.04", full version, "x" prefix) - Ansible classifies
+    # both under os_family "Debian", but templating Ubuntu with the
+    # Debian pattern silently produces a 404 ("Ubuntu_26" doesn't exist).
+    alvistack_distro_path: >-
+      {{
+        'xUbuntu_' ~ ansible_distribution_version
+        if ansible_distribution == 'Ubuntu'
+        else ansible_distribution ~ '_' ~ ansible_distribution_major_version
+      }}
 
   tasks:
     # ------------------------------------------------------------------
@@ -42,13 +54,13 @@
 
         - name: Alvistack GPG-Key herunterladen
           ansible.builtin.get_url:
-            url: "https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_major_version }}/Release.key"
+            url: "https://download.opensuse.org/repositories/home:/alvistack/{{ alvistack_distro_path }}/Release.key"
             dest: /etc/apt/keyrings/alvistack.asc
             mode: "0644"
 
         - name: Alvistack APT-Repo eintragen
           ansible.builtin.apt_repository:
-            repo: "deb [signed-by=/etc/apt/keyrings/alvistack.asc] https://download.opensuse.org/repositories/home:/alvistack/{{ ansible_distribution }}_{{ ansible_distribution_major_version }}/ /"
+            repo: "deb [signed-by=/etc/apt/keyrings/alvistack.asc] https://download.opensuse.org/repositories/home:/alvistack/{{ alvistack_distro_path }}/ /"
             state: present
             filename: alvistack-podman
 

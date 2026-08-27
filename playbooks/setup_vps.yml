@@ -2,8 +2,8 @@
 # Base configuration for a new VPS: bare system -> hardened,
 # rootless-Podman-capable system with the "admin" and "service" users.
 #
-# First run: ansible-playbook -i inventory/production.ini playbooks/setup_vps.yml -u root
-# Re-runs:   ansible-playbook -i inventory/production.ini playbooks/setup_vps.yml -u admin --ask-become-pass
+# First run: ansible-playbook -i inventory/<stage>.ini playbooks/setup_vps.yml -u root
+# Re-runs:   ansible-playbook -i inventory/<stage>.ini playbooks/setup_vps.yml -u admin --ask-become-pass
 #            (root SSH login gets disabled at the end of this playbook)
 #
 # This playbook is the bus-factor safety net in case the production system

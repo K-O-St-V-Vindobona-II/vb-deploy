@@ -12,14 +12,14 @@ DNS=1.1.1.1
 
 EnvironmentFile=%h/.env/caddy.env
 
-# --- SICHERHEITS-HARDENING ---
+# --- SECURITY HARDENING ---
 ReadOnly=true
 NoNewPrivileges=true
 DropCapability=all
-# CAP_NET_BIND_SERVICE für Ports 80/443
+# CAP_NET_BIND_SERVICE for ports 80/443
 AddCapability=CAP_NET_BIND_SERVICE
 
-# Flüchtige Verzeichnisse im RAM
+# Ephemeral directories in RAM
 Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777
 Mount=type=tmpfs,target=/run,tmpfs-mode=1777
 
@@ -27,7 +27,7 @@ Mount=type=tmpfs,target=/run,tmpfs-mode=1777
 Volume=%E/vb/infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
 Volume=%h/.local/share/caddy/caddy_data:/data
 
-# Interne Config in Named Volumes
+# Internal config in a named volume
 Volume=caddy-config.volume:/config
 
 # --- HEALTHCHECK ---

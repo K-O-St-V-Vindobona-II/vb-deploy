@@ -20,7 +20,7 @@ DropCapability=all
 
 Mount=type=tmpfs,target=/tmp
 
-# --- HealthCheck Konfiguration ---
+# --- HealthCheck configuration ---
 Notify=healthy
 HealthCmd=CMD /dozzle healthcheck
 HealthInterval=10s

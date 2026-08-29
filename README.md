@@ -590,9 +590,11 @@ podman exec vb-api alembic upgrade head
 ```
 
 **Seed data:** no separate seed script needed — `podman exec vb-api python
-scripts/downsync_prod.py` pulls real production data (unchanged, no
+scripts/downsync_prod.py --yes` pulls real production data (unchanged, no
 anonymization) from AWS S3 into the local MinIO instance and restores the
-local DB from it. Needs `~/.env/vb-api-aws-prod.env` (see
+local DB from it (`--yes` is required here since a plain `podman exec`
+without `-it` has no TTY for the interactive confirmation prompt). Needs
+`~/.env/vb-api-aws-prod.env` (see
 [Scripts](../vb-api/README.md#scripts) in `vb-api`).
 
 ---
@@ -1205,7 +1207,9 @@ podman exec vb-api alembic upgrade head
 ```
 
 **Seed-Daten:** kein separates Seed-Script nötig — `podman exec vb-api python
-scripts/downsync_prod.py` zieht echte Produktionsdaten (unverändert, keine
-Anonymisierung) von AWS S3 in die lokale MinIO-Instanz und restored die
-lokale DB daraus. Braucht `~/.env/vb-api-aws-prod.env` (siehe
+scripts/downsync_prod.py --yes` zieht echte Produktionsdaten (unverändert,
+keine Anonymisierung) von AWS S3 in die lokale MinIO-Instanz und restored
+die lokale DB daraus (`--yes` ist hier nötig, da ein reines `podman exec`
+ohne `-it` kein TTY für die interaktive Bestätigungsabfrage hat). Braucht
+`~/.env/vb-api-aws-prod.env` (siehe
 [Skripte](../vb-api/README.md#skripte) in `vb-api`).

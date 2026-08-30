@@ -58,10 +58,12 @@ second user, `admin`, exists solely for administrative root tasks
   a real systemd service. Advantage over `docker-compose`: native systemd
   integration (`systemctl --user status/restart/logs`, automatic restarts,
   healthchecks, boot persistence) without an extra Compose daemon.
-- **One pod per app**: `vb-api-pod` contains `vb-api` (backend) +
-  `vb-api-pg` (PostgreSQL) — both share a network namespace, so the
-  backend reaches the DB simply via `localhost`. `vb-intern-pod` and
-  `vb-www-pod` each contain a single nginx container. Pod/container names
+- **One pod per app**: `vb-api-pod` contains `vb-api` (backend),
+  `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey), and
+  `vb-api-worker` (the ARQ background/scheduled-job worker) — all share a
+  network namespace, so they reach each other simply via `localhost`.
+  `vb-intern-pod` and `vb-www-pod` each contain a single nginx container.
+  Pod/container names
   are identical regardless of stage (even on the dev stage) — which stage
   a container is is decided exclusively by
   `APP_ENVIRONMENT`/`VITE_APP_ENVIRONMENT` in its `EnvironmentFile`, never
@@ -339,6 +341,8 @@ app by default). "Optional" means the setting has a working default in
 | `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | required | required |
 | `vb-api.env.j2` | `SECRET_KEY` | required | required |
 | `vb-api.env.j2` | `DATABASE_URL` | required | required |
+| `vb-api.env.j2` | `REDIS_URL` | required (ARQ worker/background tasks) | required |
+| `vb-api-redis.env` | `REDIS_PASSWORD` | required (must match `vb-api.env.j2`'s `REDIS_URL`) | required |
 | `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | required (real AWS credentials) | required (this stage's MinIO root credentials) |
 | `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | not set (defaults to real AWS) | required (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
 | `vb-api.env.j2` | `S3_REGION` | required (`eu-central-1`) | optional (MinIO ignores it; `us-east-1` default) |
@@ -395,6 +399,46 @@ setup needed.
 
 **Disk space:** see [Prerequisites](#prerequisites) above — a downsynced
 mirror of the full production bucket is currently ~41GB and only grows.
+
+### ARQ Worker + Redis (All Stages)
+
+Scheduled (cron) jobs and ad-hoc background tasks (mail notifications,
+the manual downsync trigger) run in a dedicated `vb-api-worker` container
+(`arq app.worker.WorkerSettings`), not in the web container — this keeps
+request-serving isolated from the heaviest/longest-running work
+(`downsync` mirrors the entire production bucket) and gives ad-hoc tasks a
+durable, Redis-backed queue instead of FastAPI's in-process
+`BackgroundTasks` (which are silently lost if the web container crashes
+or restarts mid-task, e.g. during a deploy). `vb-api-worker` reuses the
+exact same `vb-api` image — no separate Dockerfile/CI job — its Quadlet's
+`Exec=arq app.worker.WorkerSettings` simply overrides the image's default
+`gunicorn` command, the same mechanism `vb-minio.container.j2` already
+uses for MinIO's `Exec=server /data ...`.
+
+Its Redis dependency (`vb-api-redis`, a [Valkey](https://valkey.io/) image
+— a fully open-source, wire-compatible Redis fork) joins `vb-api.pod` for
+the exact same reason MinIO does (see above): internal traffic must stay
+inside the pod's shared network namespace, never round-trip through the
+public internet, and this is the same pattern `vb-api-pg` already
+establishes for a purely internal, same-pod datastore — no
+`PublishPort=` at all, `EnvironmentFile=` for its password
+(`REDIS_PASSWORD`, matching `vb-api-pg`'s `POSTGRES_PASSWORD` posture:
+even a same-pod-only, unreachable-from-outside datastore still requires
+real credentials). Persistence is deliberately disabled
+(`--appendonly no --save ""`) — a lost, not-yet-processed job is either a
+low-stakes notification email or the manually re-triggerable downsync, so
+the added complexity of a durable Redis volume isn't worth it here; the
+underlying `vindobona2-at` data itself is never at risk, only Redis's own
+transient queue state.
+
+**Migrations run only once per restart, never twice:** `vb-api-worker`
+shares `vb-api`'s image and therefore its `docker-entrypoint.sh`, which
+normally runs `alembic upgrade head` before every start — since Alembic
+has no built-in distributed lock, two containers racing that command
+concurrently against real pending migrations would be a genuine risk, not
+just harmless redundancy. `vb-api-worker`'s Quadlet sets
+`Environment=SKIP_MIGRATIONS=true` to opt out; the web container keeps
+running migrations as before.
 
 ### Git Workflow for a New Stage
 
@@ -660,10 +704,12 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   übersetzt. Vorteil ggü. `docker-compose`: native systemd-Integration
   (`systemctl --user status/restart/logs`, automatischer Neustart, Healthchecks,
   Boot-Persistenz) ohne zusätzlichen Compose-Daemon.
-- **Ein Pod pro App**: `vb-api-pod` enthält `vb-api` (Backend) +
-  `vb-api-pg` (PostgreSQL) — beide teilen sich ein Netzwerk-Namespace,
-  das Backend erreicht die DB einfach über `localhost`. `vb-intern-pod`
-  und `vb-www-pod` enthalten je einen einzelnen nginx-Container. Pod-/
+- **Ein Pod pro App**: `vb-api-pod` enthält `vb-api` (Backend),
+  `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey) und
+  `vb-api-worker` (den ARQ-Background-/Scheduled-Job-Worker) — alle
+  teilen sich ein Netzwerk-Namespace und erreichen sich gegenseitig
+  einfach über `localhost`. `vb-intern-pod` und `vb-www-pod` enthalten je
+  einen einzelnen nginx-Container. Pod-/
   Container-Namen sind stage-unabhängig identisch (auch auf der
   Dev-Stage) — welche Stage ein Container ist, entscheidet ausschließlich
   `APP_ENVIRONMENT`/`VITE_APP_ENVIRONMENT` in seiner `EnvironmentFile`,
@@ -947,6 +993,8 @@ er leer bleibt.
 | `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Pflicht | Pflicht |
 | `vb-api.env.j2` | `SECRET_KEY` | Pflicht | Pflicht |
 | `vb-api.env.j2` | `DATABASE_URL` | Pflicht | Pflicht |
+| `vb-api.env.j2` | `REDIS_URL` | Pflicht (ARQ-Worker/Background-Tasks) | Pflicht |
+| `vb-api-redis.env` | `REDIS_PASSWORD` | Pflicht (muss zu `vb-api.env.j2`s `REDIS_URL` passen) | Pflicht |
 | `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | Pflicht (echte AWS-Credentials) | Pflicht (MinIO-Root-Credentials dieser Stage) |
 | `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | nicht gesetzt (Default: echtes AWS) | Pflicht (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
 | `vb-api.env.j2` | `S3_REGION` | Pflicht (`eu-central-1`) | optional (MinIO ignoriert es; Default `us-east-1`) |
@@ -1008,6 +1056,51 @@ Bucket-Setup nötig.
 **Plattenplatz:** siehe [Voraussetzungen](#voraussetzungen) oben — ein
 per Downsync gespiegelter Stand des kompletten Produktions-Buckets ist
 aktuell ~41GB groß und wächst nur weiter.
+
+### ARQ-Worker + Redis (alle Stages)
+
+Geplante (Cron-)Jobs und Ad-hoc-Background-Tasks (Mail-Benachrichtigungen,
+der manuelle Downsync-Trigger) laufen in einem eigenen
+`vb-api-worker`-Container (`arq app.worker.WorkerSettings`), nicht im
+Web-Container — das trennt die Request-Bearbeitung von der schwersten/
+am längsten laufenden Arbeit (`downsync` spiegelt den gesamten
+Produktions-Bucket) und gibt Ad-hoc-Tasks eine dauerhafte,
+Redis-gestützte Queue statt FastAPIs In-Process-`BackgroundTasks` (die
+stillschweigend verloren gehen, wenn der Web-Container mitten im Task
+abstürzt oder neu startet, z. B. bei einem Deploy). `vb-api-worker`
+nutzt exakt dasselbe `vb-api`-Image wieder — kein eigenes
+Dockerfile/CI-Job nötig — sein Quadlet überschreibt per
+`Exec=arq app.worker.WorkerSettings` einfach das Default-Kommando des
+Images, genau der Mechanismus, den `vb-minio.container.j2` für MinIOs
+`Exec=server /data ...` bereits nutzt.
+
+Seine Redis-Abhängigkeit (`vb-api-redis`, ein
+[Valkey](https://valkey.io/)-Image — ein vollständig quelloffener,
+protokollkompatibler Redis-Fork) tritt aus demselben Grund wie MinIO
+`vb-api.pod` bei (siehe oben): interner Traffic muss innerhalb des
+gemeinsamen Pod-Netzwerks bleiben und darf nie über das öffentliche
+Internet umgeleitet werden — dasselbe Muster, das `vb-api-pg` bereits für
+einen rein internen, im selben Pod laufenden Datenspeicher etabliert —
+kein `PublishPort=`, `EnvironmentFile=` für sein Passwort
+(`REDIS_PASSWORD`, analog zu `vb-api-pg`s `POSTGRES_PASSWORD`-Haltung:
+auch ein rein intern erreichbarer Datenspeicher braucht echte
+Credentials). Persistenz ist bewusst abgeschaltet
+(`--appendonly no --save ""`) — ein verlorener, noch nicht verarbeiteter
+Job ist entweder eine unkritische Benachrichtigungsmail oder der manuell
+erneut anstoßbare Downsync, der Mehraufwand eines dauerhaften
+Redis-Volumes lohnt sich hier nicht; die eigentlichen
+`vindobona2-at`-Daten sind davon nie betroffen, nur Redis' eigener,
+flüchtiger Queue-Zustand.
+
+**Migrationen laufen nur einmal pro Neustart, nie doppelt:**
+`vb-api-worker` teilt sich `vb-api`s Image und damit dessen
+`docker-entrypoint.sh`, das normalerweise vor jedem Start
+`alembic upgrade head` ausführt — da Alembic kein eingebautes verteiltes
+Locking hat, wäre ein Wettlauf zweier Container um denselben Befehl bei
+tatsächlich ausstehenden Migrationen ein echtes Risiko, nicht nur
+harmlose Redundanz. `vb-api-worker`s Quadlet setzt
+`Environment=SKIP_MIGRATIONS=true`, um das abzuschalten; der
+Web-Container migriert weiterhin wie bisher.
 
 ### Git-Workflow für eine neue Stage
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=ARQ Worker for VB API ({{ app_environment }})
+After=vb-api-pg.service vb-api-redis.service
+
+[Container]
+ContainerName=vb-api-worker
+Pod=vb-api.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
+AutoUpdate=registry
+Exec=arq app.worker.WorkerSettings
+EnvironmentFile=%h/.env/vb-api.env
+# The web container's own entrypoint already applies pending migrations on
+# every start - a second container running the same entrypoint concurrently
+# would redundantly (and, with real pending migrations, riskily) race it.
+Environment=SKIP_MIGRATIONS=true
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120

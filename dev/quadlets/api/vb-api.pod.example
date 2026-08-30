@@ -1,3 +1,7 @@
+[Unit]
+Wants=vb-api-redis.service
+Before=vb-api-redis.service
+
 [Pod]
 PodName=vb-api-pod
 PublishPort=127.0.0.1:20000:8000

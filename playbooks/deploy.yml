@@ -1,23 +1,22 @@
 ---
-# Laufender Betrieb: Secrets, Caddyfile und Quadlets auf dem P-System
-# synchron halten + Dienste (neu) starten. Baut KEINE Images, klont KEINE
-# App-Repos, restored KEINE Daten - das ist alles nicht mehr Aufgabe dieses
-# Playbooks (siehe Plan "Ansible/Deployment neu aufgesetzt" fuer die
-# Begruendung: die drei App-Images kommen bereits fertig gebaut aus ghcr.io
-# und werden vom bereits aktiven podman-auto-update.timer automatisch
-# eingespielt).
+# Day-2 operation: keep secrets, Caddyfile and Quadlets on the production
+# system in sync + (re)start services. Builds NO images, clones NO app
+# repos, restores NO data - none of that is this playbook's job anymore
+# (see the "Ansible/deployment rebuilt" plan for the rationale: the three
+# app images already arrive fully built from ghcr.io and get rolled out
+# automatically by the already-active podman-auto-update.timer).
 #
-# Multi-Stage: -i waehlt die Stage, es gibt kein Default-Inventory.
+# Multi-stage: -i selects the stage, there is no default inventory.
 #
-# Aufruf: ansible-playbook -i inventory/<stage>.ini playbooks/deploy.yml --ask-vault-pass
+# Invocation: ansible-playbook -i inventory/<stage>.ini playbooks/deploy.yml --ask-vault-pass
 #
-# Sofort-Deploy statt auf den naechtlichen Auto-Update-Lauf zu warten:
+# Immediate deploy instead of waiting for the nightly auto-update run:
 #   ansible-playbook ... --ask-vault-pass --tags deploy-api
 #   ansible-playbook ... --ask-vault-pass --tags deploy-intern
 #   ansible-playbook ... --ask-vault-pass --tags deploy-www
-# (diese Tasks laufen NUR, wenn der jeweilige Tag explizit angegeben wird)
+# (these tasks run ONLY when the respective tag is explicitly given)
 
-- name: Deploy/Sync auf dem P-System
+- name: Deploy/sync on the production system
   hosts: vps
   remote_user: service
   gather_facts: yes
@@ -26,8 +25,14 @@
     local_quadlets_path: "../quadlets"
     local_timers_path: "../systemd-timers"
     local_caddyfile_template: "../config/caddy/Caddyfile.j2"
+    local_api_pod_template: "../templates/vb-api.pod.j2"
     local_api_quadlet_template: "../templates/vb-api.container.j2"
     local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
+    local_redis_quadlet_template: "../templates/vb-api-redis.container.j2"
+    local_worker_quadlet_template: "../templates/vb-api-worker.container.j2"
+    local_minio_quadlet_template: "../templates/vb-minio.container.j2"
+    local_intern_quadlet_template: "../templates/vb-intern.container.j2"
+    local_www_quadlet_template: "../templates/vb-www.container.j2"
 
     remote_env_dir: "{{ ansible_user_dir }}/.env"
     remote_quadlet_base: "{{ ansible_user_dir }}/.config/containers/systemd"
@@ -35,51 +40,56 @@
     remote_caddy_config_dir: "{{ ansible_user_dir }}/.config/vb/infrastructure/caddy"
     xdg_runtime_dir: "/run/user/{{ ansible_facts.user_uid }}"
 
-    # Quadlet-Quellordner -> Zielpfad unter remote_quadlet_base.
-    # Zwei gewachsene, bewusst beibehaltene Konventionen: "vb/<name>" fuer
-    # Caddy/Maintenance/Logging, "vindobona2.at/<name>" fuer die drei Apps.
+    # Quadlet source folder -> destination path under remote_quadlet_base,
+    # for the remaining STATIC Quadlet files (no Jinja2 templating
+    # needed). "api" is deliberately NOT in here anymore: vb-api.pod,
+    # vb-api.container and vb-api-pg.container are all three templates by
+    # now (domain-/stage-/MinIO-dependent) - see their own render tasks
+    # further below, including their own "vindobona2.at/api" directory
+    # creation there.
     quadlet_targets:
       - { src: caddy, dest: "vb/infrastructure/caddy" }
       - { src: maintenance, dest: "vb/infrastructure/maintenance" }
       - { src: logging, dest: "vb/logging" }
-      - { src: api, dest: "vindobona2.at/api" }
       - { src: intern, dest: "vindobona2.at/intern" }
       - { src: www, dest: "vindobona2.at/www" }
 
-    # Units, die nach jedem Sync explizit (neu) aktiviert/gestartet werden.
-    # Wants=/After= in den .pod-Dateien wirkt nur beim ALLERERSTEN Start
-    # eines Pods - laeuft der Haupt-Container (z.B. vb-api.service)
-    # bereits, ruehrt Ansibles "state: started" ihn nicht mehr an, und eine
-    # zuvor fehlgeschlagene Abhaengigkeit (z.B. vb-api-pg.service)
-    # bleibt "failed" haengen, statt erneut versucht zu werden. Deshalb
-    # explizit auflisten statt auf die Pod-Abhaengigkeit zu vertrauen.
-    managed_units:
-      - caddy.service
-      - logging-dozzle.service
-      - vb-api-pg.service
-      - vb-api.service
-      - vb-intern.service
-      - vb-www.service
+    # Units that get explicitly (re)enabled/started after every sync.
+    # Wants=/After= in the .pod files only takes effect on the VERY FIRST
+    # start of a pod - if the main container (e.g. vb-api.service) is
+    # already running, Ansible's "state: started" leaves it alone, and a
+    # previously failed dependency (e.g. vb-api-pg.service) stays stuck
+    # as "failed" instead of being retried. Hence listing them explicitly
+    # instead of relying on the pod dependency.
+    # vb-minio only on non-production stages, see quadlet_targets above.
+    managed_units: >-
+      {{
+        [
+          'caddy.service', 'logging-dozzle.service', 'vb-api-pg.service',
+          'vb-api-redis.service', 'vb-api-worker.service',
+          'vb-api.service', 'vb-intern.service', 'vb-www.service',
+        ] + (['vb-minio.service'] if app_environment != 'production' else [])
+      }}
 
   tasks:
     # ------------------------------------------------------------------
-    # 0. Stage validieren
+    # 0. Validate stage
     # ------------------------------------------------------------------
-    - name: "Stage validieren"
+    - name: "Validate stage"
       tags: [always]
       ansible.builtin.assert:
         that:
           - app_environment in ['test', 'qa', 'production']
         fail_msg: >-
-          app_environment muss test, qa oder production sein (aktuell:
-          '{{ app_environment }}'). Development-Instanzen laufen nie ueber
-          dieses Repo, sondern lokal per eigenen Podman-Quadlets.
-        success_msg: "Stage '{{ app_environment }}' ist gueltig."
+          app_environment must be test, qa, or production (currently:
+          '{{ app_environment }}'). Development instances never run
+          through this repo - only locally via their own Podman Quadlets.
+        success_msg: "Stage '{{ app_environment }}' is valid."
 
     # ------------------------------------------------------------------
-    # 1. Verzeichnisse sicherstellen
+    # 1. Ensure directories exist
     # ------------------------------------------------------------------
-    - name: Verzeichnisstruktur anlegen
+    - name: Create directory structure
       loop:
         - "{{ remote_env_dir }}"
         - "{{ remote_quadlet_base }}"
@@ -87,20 +97,49 @@
         - "{{ remote_caddy_config_dir }}"
         - "{{ ansible_user_dir }}/.local/share/caddy/caddy_data"
         - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/redis"
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
         mode: "0700"
 
+    - name: Create MinIO data directory (non-production only, see README)
+      when: app_environment != 'production'
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/minio"
+        state: directory
+        mode: "0700"
+
+    # Rootless-Podman mapping fix: a freshly created directory belongs to
+    # "service" in the normal UID namespace, but inside the container
+    # sees its own "postgres" user (UID 999) in a mapped namespace -
+    # without this fix, initdb fails on the very first start with
+    # "Permission denied" (empirically verified, see README). Both
+    # commands must run under podman unshare, not just the chown -
+    # afterwards the directory belongs to the mapped UID, and "service"
+    # itself can no longer touch it from the outside. A no-op on
+    # already-initialized directories (chown/chmod are idempotent).
+    - name: Ensure Postgres data directory ownership (rootless mapping)
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
+
+    - name: Ensure Postgres data directory permissions
+      ansible.builtin.command: >-
+        podman unshare chmod 700
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
+
     # ------------------------------------------------------------------
-    # 2. Secrets verteilen (ansible-vault-verschluesselt im Repo,
-    #    Ansible entschluesselt transparent beim Kopieren/Rendern).
-    #    Zwei Paare: statische *.env-Dateien werden 1:1 kopiert,
-    #    *.env.j2-Dateien werden zuerst mit den Stage-/Domain-Vars
-    #    aus der Inventory gerendert (Vault-Entschluesselung passiert
-    #    dabei zuerst, das Jinja2-Templating danach - keine Kollision).
+    # 2. Distribute secrets (ansible-vault-encrypted in the repo, Ansible
+    #    decrypts transparently while copying/rendering). Two pairs:
+    #    static *.env files get copied 1:1, *.env.j2 files first get
+    #    rendered with the stage/domain vars from the inventory (vault
+    #    decryption happens first, Jinja2 templating after - no
+    #    collision).
     # ------------------------------------------------------------------
-    - name: "*.env aus secrets/<stage>/ finden"
+    - name: "Find *.env in secrets/<stage>/"
       delegate_to: localhost
       become: no
       ansible.builtin.find:
@@ -108,7 +147,7 @@
         patterns: "*.env"
       register: secret_files
 
-    - name: Secrets nach ~/.env kopieren
+    - name: Copy secrets to ~/.env
       no_log: true
       loop: "{{ secret_files.files }}"
       loop_control:
@@ -118,7 +157,7 @@
         dest: "{{ remote_env_dir }}/{{ item.path | basename }}"
         mode: "0600"
 
-    - name: "*.env.j2 aus secrets/<stage>/ finden"
+    - name: "Find *.env.j2 in secrets/<stage>/"
       delegate_to: localhost
       become: no
       ansible.builtin.find:
@@ -126,7 +165,7 @@
         patterns: "*.env.j2"
       register: secret_templates
 
-    - name: Secret-Templates rendern nach ~/.env
+    - name: Render secret templates to ~/.env
       no_log: true
       loop: "{{ secret_templates.files }}"
       loop_control:
@@ -137,18 +176,18 @@
         mode: "0600"
 
     # ------------------------------------------------------------------
-    # 3. Caddyfile rendern (Hosts kommen aus den Stage-Domain-Vars)
+    # 3. Render Caddyfile (hosts come from the stage domain vars)
     # ------------------------------------------------------------------
-    - name: Caddyfile rendern
+    - name: Render Caddyfile
       ansible.builtin.template:
         src: "{{ local_caddyfile_template }}"
         dest: "{{ remote_caddy_config_dir }}/Caddyfile"
         mode: "0644"
 
     # ------------------------------------------------------------------
-    # 4. Quadlets synchronisieren
+    # 4. Sync Quadlets
     # ------------------------------------------------------------------
-    - name: Quadlet-Verzeichnisse anlegen
+    - name: Create Quadlet directories
       loop: "{{ quadlet_targets }}"
       loop_control:
         label: "{{ item.dest }}"
@@ -157,7 +196,7 @@
         state: directory
         mode: "0755"
 
-    - name: Quadlet-Dateien kopieren
+    - name: Copy Quadlet files
       loop: "{{ quadlet_targets }}"
       loop_control:
         label: "{{ item.dest }}"
@@ -166,26 +205,69 @@
         dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
         mode: "0644"
 
-    - name: API-Quadlet rendern (AWS-Prod-EnvironmentFile nur ausserhalb production)
+    - name: Create vindobona2.at/api directory (templates only, no static copy task for it)
+      ansible.builtin.file:
+        path: "{{ remote_quadlet_base }}/vindobona2.at/api"
+        state: directory
+        mode: "0755"
+
+    - name: Render API pod (domain comes from app_environment, MinIO ports non-production only)
+      ansible.builtin.template:
+        src: "{{ local_api_pod_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.pod"
+        mode: "0644"
+
+    - name: Render API Quadlet
       ansible.builtin.template:
         src: "{{ local_api_quadlet_template }}"
         dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.container"
         mode: "0644"
 
-    - name: Postgres-Quadlet rendern (Datenpfad kommt aus app_environment)
+    - name: Render Postgres Quadlet (data path comes from app_environment)
       ansible.builtin.template:
         src: "{{ local_pg_quadlet_template }}"
         dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-pg.container"
         mode: "0644"
 
-    - name: Systemd-Timer kopieren (kein Quadlet, eigener Zielpfad)
+    - name: Render Redis Quadlet (data path comes from app_environment; joins vb-api.pod like vb-api-pg, no PublishPort)
+      ansible.builtin.template:
+        src: "{{ local_redis_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-redis.container"
+        mode: "0644"
+
+    - name: Render ARQ worker Quadlet (reuses the vb-api image, Exec= overrides its default CMD)
+      ansible.builtin.template:
+        src: "{{ local_worker_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-worker.container"
+        mode: "0644"
+
+    - name: Render MinIO Quadlet (non-production only; shares vb-api.pod, see the pod-network comment there)
+      when: app_environment != 'production'
+      ansible.builtin.template:
+        src: "{{ local_minio_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-minio.container"
+        mode: "0644"
+
+    - name: 'Render intern Quadlet (Description shows the real stage instead of hardcoded "Prod")'
+      ansible.builtin.template:
+        src: "{{ local_intern_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/intern/vb-intern.container"
+        mode: "0644"
+
+    - name: 'Render www Quadlet (Description shows the real stage instead of hardcoded "Prod")'
+      ansible.builtin.template:
+        src: "{{ local_www_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/www/vb-www.container"
+        mode: "0644"
+
+    - name: Copy systemd timers (not a Quadlet, own destination path)
       ansible.builtin.copy:
         src: "{{ local_timers_path }}/"
         dest: "{{ remote_systemd_user_dir }}/"
         mode: "0644"
 
     # ------------------------------------------------------------------
-    # 5. Neue/geaenderte Units bekannt machen
+    # 5. Make new/changed units known
     # ------------------------------------------------------------------
     - name: systemctl --user daemon-reload
       ansible.builtin.systemd:
@@ -195,9 +277,9 @@
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
 
     # ------------------------------------------------------------------
-    # 6. Dienste + Timer (neu) starten/aktivieren
+    # 6. (Re)start/enable services + timers
     # ------------------------------------------------------------------
-    - name: Dienste aktivieren + starten
+    - name: Enable + start services
       loop: "{{ managed_units }}"
       ansible.builtin.systemd:
         scope: user
@@ -207,7 +289,7 @@
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
 
-    - name: podman-prune.timer aktivieren + starten
+    - name: Enable + start podman-prune.timer
       ansible.builtin.systemd:
         scope: user
         name: podman-prune.timer
@@ -217,23 +299,22 @@
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
 
     # ------------------------------------------------------------------
-    # 7. Optionaler Sofort-Deploy (nur bei explizitem --tags)
+    # 7. Optional immediate deploy (only with explicit --tags)
     # ------------------------------------------------------------------
-    - name: "Sofort-Deploy vb-api: Image pullen"
+    - name: "Immediate deploy vb-api: pull image"
       tags: [never, deploy-api]
       ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
       changed_when: true
 
-    - name: "Sofort-Deploy vb-api: Pod neu starten"
-      # NICHT vb-api.service direkt neu starten: der Container ist
-      # per generiertem BindsTo= an vb-api-pod.service gebunden -
-      # ein Container-Restart stoppt (und entfernt) dabei den ganzen Pod,
-      # aber nichts startet den Pod danach von selbst wieder ("Dependency
-      # failed", empirisch verifiziert). Der Pod-Service selbst zieht
-      # beim Neustart alle enthaltenen Container ueber Wants=/Before=
-      # korrekt wieder hoch.
+    - name: "Immediate deploy vb-api: restart pod"
+      # Do NOT restart vb-api.service directly: the container is bound
+      # to vb-api-pod.service via a generated BindsTo= - restarting the
+      # container stops (and removes) the whole pod, but nothing then
+      # starts the pod back up on its own ("Dependency failed",
+      # empirically verified). The pod service itself correctly brings
+      # all its containers back up via Wants=/Before= on restart.
       tags: [never, deploy-api]
       ansible.builtin.systemd:
         scope: user
@@ -242,15 +323,16 @@
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
 
-    - name: "Sofort-Deploy vb-intern: Image pullen"
+    - name: "Immediate deploy vb-intern: pull image"
       tags: [never, deploy-intern]
       ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-intern:latest
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
       changed_when: true
 
-    - name: "Sofort-Deploy vb-intern: Pod neu starten"
-      # Siehe Kommentar bei vb-api oben - Pod-Service statt Container-Service.
+    - name: "Immediate deploy vb-intern: restart pod"
+      # See the comment for vb-api above - pod service instead of
+      # container service.
       tags: [never, deploy-intern]
       ansible.builtin.systemd:
         scope: user
@@ -259,15 +341,16 @@
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
 
-    - name: "Sofort-Deploy vb-www: Image pullen"
+    - name: "Immediate deploy vb-www: pull image"
       tags: [never, deploy-www]
       ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
       environment:
         XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
       changed_when: true
 
-    - name: "Sofort-Deploy vb-www: Pod neu starten"
-      # Siehe Kommentar bei vb-api oben - Pod-Service statt Container-Service.
+    - name: "Immediate deploy vb-www: restart pod"
+      # See the comment for vb-api above - pod service instead of
+      # container service.
       tags: [never, deploy-www]
       ansible.builtin.systemd:
         scope: user

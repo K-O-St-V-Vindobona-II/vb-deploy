@@ -1,0 +1,27 @@
+[Unit]
+Description=ARQ Worker for VB API (Dev)
+After=vb-api-pg.service vb-api-redis.service
+
+[Container]
+ContainerName=vb-api-worker
+Pod=vb-api.pod
+Image=vb-api:dev
+AutoUpdate=local
+Exec=arq app.worker.WorkerSettings
+
+Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
+UserNS=keep-id
+Environment=WATCHFILES_FORCE_POLLING=true
+# The web container's own entrypoint already applies pending migrations on
+# every start - a second container running the same entrypoint concurrently
+# would redundantly (and, with real pending migrations, riskily) race it.
+Environment=SKIP_MIGRATIONS=true
+EnvironmentFile=%h/.env/vb-api.env
+# Optional: AWS credentials for the non-prod downsync script/job. The
+# leading "-" makes the file optional - its absence is not an error.
+EnvironmentFile=-%h/.env/vb-api-aws-prod.env
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120

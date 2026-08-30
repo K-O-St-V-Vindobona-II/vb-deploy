@@ -1,0 +1,21 @@
+[Unit]
+Description=Valkey for VB API ({{ app_environment }})
+
+[Container]
+ContainerName=vb-api-valkey
+Pod=vb-api.pod
+Image=docker.io/valkey/valkey:8
+AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-api-valkey.env
+Exec=sh -c 'exec valkey-server --requirepass "$VALKEY_PASSWORD" --appendonly no --save ""'
+Volume=%h/data/vb/{{ app_environment }}/valkey:/data:Z
+
+HealthCmd=valkey-cli -a "$VALKEY_PASSWORD" ping || exit 1
+HealthInterval=10s
+HealthTimeout=5s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStartSec=60

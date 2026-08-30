@@ -28,7 +28,7 @@
     local_api_pod_template: "../templates/vb-api.pod.j2"
     local_api_quadlet_template: "../templates/vb-api.container.j2"
     local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
-    local_redis_quadlet_template: "../templates/vb-api-redis.container.j2"
+    local_valkey_quadlet_template: "../templates/vb-api-valkey.container.j2"
     local_worker_quadlet_template: "../templates/vb-api-worker.container.j2"
     local_minio_quadlet_template: "../templates/vb-minio.container.j2"
     local_intern_quadlet_template: "../templates/vb-intern.container.j2"
@@ -66,7 +66,7 @@
       {{
         [
           'caddy.service', 'logging-dozzle.service', 'vb-api-pg.service',
-          'vb-api-redis.service', 'vb-api-worker.service',
+          'vb-api-valkey.service', 'vb-api-worker.service',
           'vb-api.service', 'vb-intern.service', 'vb-www.service',
         ] + (['vb-minio.service'] if app_environment != 'production' else [])
       }}
@@ -97,7 +97,7 @@
         - "{{ remote_caddy_config_dir }}"
         - "{{ ansible_user_dir }}/.local/share/caddy/caddy_data"
         - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres"
-        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/redis"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/valkey"
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -229,10 +229,10 @@
         dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-pg.container"
         mode: "0644"
 
-    - name: Render Redis Quadlet (data path comes from app_environment; joins vb-api.pod like vb-api-pg, no PublishPort)
+    - name: Render Valkey Quadlet (data path comes from app_environment; joins vb-api.pod like vb-api-pg, no PublishPort)
       ansible.builtin.template:
-        src: "{{ local_redis_quadlet_template }}"
-        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-redis.container"
+        src: "{{ local_valkey_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-valkey.container"
         mode: "0644"
 
     - name: Render ARQ worker Quadlet (reuses the vb-api image, Exec= overrides its default CMD)

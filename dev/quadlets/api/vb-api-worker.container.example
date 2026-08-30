@@ -17,9 +17,14 @@ Environment=WATCHFILES_FORCE_POLLING=true
 # would redundantly (and, with real pending migrations, riskily) race it.
 Environment=SKIP_MIGRATIONS=true
 EnvironmentFile=%h/.env/vb-api.env
-# Optional: AWS credentials for the non-prod downsync script/job. The
-# leading "-" makes the file optional - its absence is not an error.
-EnvironmentFile=-%h/.env/vb-api-aws-prod.env
+# AWS credentials for the non-prod downsync script/job. No leading "-"
+# here - Quadlet's EnvironmentFile= does not support an "optional if
+# missing" file (unlike plain systemd units), it always resolves to a
+# required `podman run --env-file`. The file is a mandatory copy like
+# every other dev/env/*.example (see the README) and ships with
+# change-me placeholders, which are enough for the container to start;
+# only an actual downsync attempt needs real values.
+EnvironmentFile=%h/.env/vb-api-aws-prod.env
 
 [Service]
 Restart=always

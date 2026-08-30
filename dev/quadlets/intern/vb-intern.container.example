@@ -4,8 +4,8 @@ After=vb-api-pod.service
 
 [Container]
 ContainerName=vb-intern
-Pod=vb-intern.pod
 Image=docker.io/library/node:22-slim
+PublishPort=127.0.0.1:20001:5173
 Volume=<path-to-vb-fastapi-vue>/vb-intern:/app:Z
 UserNS=keep-id
 PodmanArgs=--workdir=/app
@@ -22,3 +22,6 @@ HealthStartPeriod=15s
 Restart=always
 RestartSec=5
 TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

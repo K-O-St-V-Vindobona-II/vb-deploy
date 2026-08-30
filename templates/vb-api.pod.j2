@@ -1,6 +1,6 @@
 [Unit]
-Wants=vb-api-pg.service vb-api.service vb-api-redis.service
-Before=vb-api-pg.service vb-api.service vb-api-redis.service
+Wants=vb-api-pg.service vb-api.service vb-api-valkey.service
+Before=vb-api-pg.service vb-api.service vb-api-valkey.service
 {% if app_environment != 'production' %}
 # MinIO joins this pod (not its own) so vb-api reaches it via the shared
 # pod network namespace (localhost) - a separate pod is only reachable

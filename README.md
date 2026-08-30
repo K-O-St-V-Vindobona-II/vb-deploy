@@ -58,14 +58,15 @@ second user, `admin`, exists solely for administrative root tasks
   a real systemd service. Advantage over `docker-compose`: native systemd
   integration (`systemctl --user status/restart/logs`, automatic restarts,
   healthchecks, boot persistence) without an extra Compose daemon.
-- **One pod per app**: `vb-api-pod` contains `vb-api` (backend),
-  `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey), and
+- **One pod per app in production**: `vb-api-pod` contains `vb-api`
+  (backend), `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey), and
   `vb-api-worker` (the ARQ background/scheduled-job worker) — all share a
-  network namespace, so they reach each other simply via `localhost`.
-  `vb-intern-pod` and `vb-www-pod` each contain a single nginx container.
-  Pod/container names
-  are identical regardless of stage (even on the dev stage) — which stage
-  a container is is decided exclusively by
+  network namespace, so they reach each other simply via `localhost`. On
+  non-dev stages, `vb-intern-pod` and `vb-www-pod` each contain a single
+  nginx container; on the dev stage, `vb-intern`/`vb-www` run as
+  standalone containers without a pod (a plain `npm run dev` Vite server
+  needs no sidecar). Container names are identical regardless of stage —
+  which stage a container is is decided exclusively by
   `APP_ENVIRONMENT`/`VITE_APP_ENVIRONMENT` in its `EnvironmentFile`, never
   by the name itself.
 - **Caddy** is the only service that listens publicly on port 80/443. It
@@ -609,7 +610,8 @@ resolution + your own local reverse proxy:
    ▼
 local reverse proxy (your choice, e.g. Caddy)
    ├─ api.<your-dev-domain>    → 127.0.0.1:20000 → vb-api-pod
-   ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern-pod
+   ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern
+   ├─ www.<your-dev-domain>    → 127.0.0.1:20002 → vb-www
    └─ minio.<your-dev-domain>  → 127.0.0.1:9000  → vb-minio-pod
 ```
 
@@ -627,7 +629,7 @@ needed for domain-based browser testing).
 podman build --target dev -t vb-api:dev <path-to-vb-fastapi-vue>/vb-api
 
 systemctl --user daemon-reload
-systemctl --user start vb-minio-pod vb-api-pod vb-intern-pod vb-www-pod
+systemctl --user start vb-minio-pod vb-api-pod vb-intern vb-www
 
 # Create the database schema:
 podman exec vb-api alembic upgrade head
@@ -704,14 +706,16 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   übersetzt. Vorteil ggü. `docker-compose`: native systemd-Integration
   (`systemctl --user status/restart/logs`, automatischer Neustart, Healthchecks,
   Boot-Persistenz) ohne zusätzlichen Compose-Daemon.
-- **Ein Pod pro App**: `vb-api-pod` enthält `vb-api` (Backend),
-  `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey) und
+- **Ein Pod pro App in Produktion**: `vb-api-pod` enthält `vb-api`
+  (Backend), `vb-api-pg` (PostgreSQL), `vb-api-redis` (Redis/Valkey) und
   `vb-api-worker` (den ARQ-Background-/Scheduled-Job-Worker) — alle
   teilen sich ein Netzwerk-Namespace und erreichen sich gegenseitig
-  einfach über `localhost`. `vb-intern-pod` und `vb-www-pod` enthalten je
-  einen einzelnen nginx-Container. Pod-/
-  Container-Namen sind stage-unabhängig identisch (auch auf der
-  Dev-Stage) — welche Stage ein Container ist, entscheidet ausschließlich
+  einfach über `localhost`. Auf Non-Dev-Stages enthalten `vb-intern-pod`
+  und `vb-www-pod` je einen einzelnen nginx-Container; auf der Dev-Stage
+  laufen `vb-intern`/`vb-www` als eigenständige Container ohne Pod (ein
+  reiner `npm run dev`-Vite-Server braucht keinen Sidecar). Container-
+  Namen sind stage-unabhängig identisch — welche Stage ein Container ist,
+  entscheidet ausschließlich
   `APP_ENVIRONMENT`/`VITE_APP_ENVIRONMENT` in seiner `EnvironmentFile`,
   nie der Name selbst.
 - **Caddy** ist der einzige Dienst, der öffentlich auf Port 80/443 lauscht.
@@ -1275,7 +1279,8 @@ einen eigenen lokalen Reverse-Proxy einrichten:
    ▼
 lokaler Reverse-Proxy (eigene Wahl, z.B. Caddy)
    ├─ api.<your-dev-domain>    → 127.0.0.1:20000 → vb-api-pod
-   ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern-pod
+   ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern
+   ├─ www.<your-dev-domain>    → 127.0.0.1:20002 → vb-www
    └─ minio.<your-dev-domain>  → 127.0.0.1:9000  → vb-minio-pod
 ```
 
@@ -1293,7 +1298,7 @@ für domainbasiertes Browser-Testen nötig).
 podman build --target dev -t vb-api:dev <path-to-vb-fastapi-vue>/vb-api
 
 systemctl --user daemon-reload
-systemctl --user start vb-minio-pod vb-api-pod vb-intern-pod vb-www-pod
+systemctl --user start vb-minio-pod vb-api-pod vb-intern vb-www
 
 # Datenbankschema anlegen:
 podman exec vb-api alembic upgrade head

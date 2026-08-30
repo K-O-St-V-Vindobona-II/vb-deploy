@@ -434,6 +434,25 @@ the added complexity of a durable Valkey volume isn't worth it here; the
 underlying `vindobona2-at` data itself is never at risk, only Valkey's
 own transient queue state.
 
+**"Memory overcommit must be enabled" warning on every Valkey start:**
+harmless here — that warning is about `fork()` failing under memory
+pressure during a background save, and with persistence disabled above
+there is no background save to ever fork for. Silencing it needs a
+host-wide kernel setting (`vm.overcommit_memory`), not a per-container
+one — it affects every process on the VPS, including the unrelated
+services the P-System also hosts, so it's left as an optional, manual
+opt-in rather than something `deploy.yml` sets automatically:
+
+```
+echo 'vm.overcommit_memory = 1' | sudo tee /etc/sysctl.d/99-podman-valkey.conf
+sudo sysctl -p /etc/sysctl.d/99-podman-valkey.conf
+```
+
+The `sysctl.d` file (rather than a one-off `sysctl -w`) makes it survive
+a reboot. Only the *next* Valkey start picks up a clean log — the
+warning already written by an already-running container stays in its
+log history.
+
 **Migrations run only once per restart, never twice:** `vb-api-worker`
 shares `vb-api`'s image and therefore its `docker-entrypoint.sh`, which
 normally runs `alembic upgrade head` before every start — since Alembic
@@ -1098,6 +1117,27 @@ Benachrichtigungsmail oder der manuell erneut anstoßbare Downsync, der
 Mehraufwand eines dauerhaften Valkey-Volumes lohnt sich hier nicht; die
 eigentlichen `vindobona2-at`-Daten sind davon nie betroffen, nur Valkeys
 eigener, flüchtiger Queue-Zustand.
+
+**"Memory overcommit must be enabled"-Warnung bei jedem Valkey-Start:**
+hier harmlos — die Warnung betrifft ein mögliches `fork()`-Scheitern
+unter Speicherdruck während eines Background-Saves, und bei
+abgeschalteter Persistenz (siehe oben) gibt es nie einen Background-Save,
+für den geforkt werden müsste. Stummschalten braucht ein host-weites
+Kernel-Setting (`vm.overcommit_memory`), kein containerspezifisches — es
+betrifft jeden Prozess auf dem VPS, auch die fremden, unabhängigen
+Dienste, die das P-System zusätzlich hostet. Deshalb bewusst als
+optionaler, manueller Opt-in belassen statt automatisch von `deploy.yml`
+gesetzt:
+
+```
+echo 'vm.overcommit_memory = 1' | sudo tee /etc/sysctl.d/99-podman-valkey.conf
+sudo sysctl -p /etc/sysctl.d/99-podman-valkey.conf
+```
+
+Die `sysctl.d`-Datei (statt eines einmaligen `sysctl -w`) übersteht auch
+einen Reboot. Ein sauberes Log zeigt erst der *nächste* Valkey-Start —
+die bereits geschriebene Warnung eines schon laufenden Containers bleibt
+in dessen Log-Historie stehen.
 
 **Migrationen laufen nur einmal pro Neustart, nie doppelt:**
 `vb-api-worker` teilt sich `vb-api`s Image und damit dessen

@@ -14,7 +14,22 @@ EnvironmentFile=%h/.env/vb-api.env
 # would redundantly (and, with real pending migrations, riskily) race it.
 Environment=SKIP_MIGRATIONS=true
 
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# Ephemeral scratch space in RAM for pg_dump/pg_restore temp files
+# (backup/downsync jobs) - nothing else on the filesystem needs to be
+# writable in this container.
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=256m
+
 [Service]
 Restart=always
 RestartSec=5
 TimeoutStartSec=120
+# arq's own job-timeout default (300s, unchanged in WorkerSettings) is how
+# long it waits for an in-progress job to finish on SIGTERM before giving
+# up. Set well above that so a routine restart can never cut off a running
+# job mid-way (e.g. a downsync) - only ever hit for a genuinely stuck job.
+TimeoutStopSec=310

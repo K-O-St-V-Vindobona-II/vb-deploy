@@ -1,6 +1,6 @@
 [Unit]
 Description=ARQ Worker for VB API (Dev)
-After=vb-api-pg.service vb-api-redis.service
+After=vb-api-pg.service vb-api-valkey.service
 
 [Container]
 ContainerName=vb-api-worker

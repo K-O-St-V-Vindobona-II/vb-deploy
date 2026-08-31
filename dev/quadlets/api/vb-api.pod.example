@@ -1,6 +1,6 @@
 [Unit]
-Wants=vb-api-redis.service
-Before=vb-api-redis.service
+Wants=vb-api-valkey.service
+Before=vb-api-valkey.service
 
 [Pod]
 PodName=vb-api-pod

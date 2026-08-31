@@ -131,6 +131,18 @@
         {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
       changed_when: false
 
+    # Same rootless-mapping fix as Postgres above: the vb-api-valkey Quadlet
+    # now starts the container directly as UID 999 (the "valkey" user's
+    # mapped UID) to run fully capability-less, which requires this
+    # directory to already be owned by that UID before the container's own
+    # entrypoint - which only chowns/re-execs when started as root - ever
+    # runs. A no-op on already-initialized directories.
+    - name: Ensure Valkey data directory ownership (rootless mapping)
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/valkey
+      changed_when: false
+
     # ------------------------------------------------------------------
     # 2. Distribute secrets (ansible-vault-encrypted in the repo, Ansible
     #    decrypts transparently while copying/rendering). Two pairs:

@@ -10,6 +10,16 @@ Image=quay.io/podman/stable:latest
 Volume=%t/podman/podman.sock:/run/podman/podman.sock
 Environment=CONTAINER_HOST=unix:///run/podman/podman.sock
 
+# --- SECURITY HARDENING ---
+# Purely a podman CLI client talking to the mounted host socket via
+# CONTAINER_HOST - live-verified, no capabilities needed for that.
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=16m
+Mount=type=tmpfs,target=/run,tmpfs-mode=1777,tmpfs-size=16m
+
 Exec=/bin/sh -c 'podman image prune -a -f && podman system prune -f && echo "SUCCESS: All unused images have been cleaned up."'
 
 [Service]

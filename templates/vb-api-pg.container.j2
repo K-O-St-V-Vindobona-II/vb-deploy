@@ -9,6 +9,23 @@ AutoUpdate=registry
 EnvironmentFile=%h/.env/vb-api-pg.env
 Volume=%h/data/vb/{{ app_environment }}/postgres:/var/lib/postgresql:Z
 
+# --- SECURITY HARDENING ---
+# The playbook pre-chowns the data directory to UID 999 (see
+# "Ensure Postgres data directory ownership" in deploy.yml) before this
+# container ever starts. The official entrypoint only chowns PGDATA and
+# re-execs itself via gosu when it detects it is running as root - started
+# directly as UID 999, it skips both and runs postgres natively, so no
+# capabilities need to be added back at all.
+User=999
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# The unix socket directory isn't part of the mounted data volume, and
+# postgres/pg_isready need /tmp for sorts and (once, on init) nss_wrapper.
+Mount=type=tmpfs,target=/var/run/postgresql,tmpfs-mode=1777,tmpfs-size=32m
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=32m
+
 HealthCmd=pg_isready -U vb -d vb || exit 1
 HealthInterval=10s
 HealthTimeout=10s

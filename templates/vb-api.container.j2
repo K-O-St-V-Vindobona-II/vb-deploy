@@ -9,6 +9,17 @@ Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
 AutoUpdate=registry
 EnvironmentFile=%h/.env/vb-api.env
 
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# Ephemeral scratch space in RAM: gunicorn's own worker heartbeat file,
+# Starlette's multipart upload spooling above 1 MiB, and pg_dump/pg_restore
+# temp files (backup/downsync) all write here - nothing else on the
+# filesystem needs to be writable.
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=256m
+
 HealthCmd=python3 -c 'import urllib.request; urllib.request.urlopen("http://localhost:8000/")'
 HealthInterval=30s
 HealthTimeout=5s
@@ -19,3 +30,7 @@ HealthStartPeriod=10s
 Restart=always
 RestartSec=5
 TimeoutStartSec=120
+# Matches gunicorn's --graceful-timeout (30s) plus a small buffer, so
+# systemd never sends SIGKILL before gunicorn's own shutdown grace period
+# for in-flight requests has run out.
+TimeoutStopSec=35

@@ -49,7 +49,6 @@
     # creation there.
     quadlet_targets:
       - { src: caddy, dest: "vb/infrastructure/caddy" }
-      - { src: maintenance, dest: "vb/infrastructure/maintenance" }
       - { src: logging, dest: "vb/logging" }
       - { src: intern, dest: "vindobona2.at/intern" }
       - { src: www, dest: "vindobona2.at/www" }
@@ -272,7 +271,7 @@
         dest: "{{ remote_quadlet_base }}/vindobona2.at/www/vb-www.container"
         mode: "0644"
 
-    - name: Copy systemd timers (not a Quadlet, own destination path)
+    - name: Copy native systemd units (podman-prune service + timer, not Quadlets, own destination path)
       ansible.builtin.copy:
         src: "{{ local_timers_path }}/"
         dest: "{{ remote_systemd_user_dir }}/"

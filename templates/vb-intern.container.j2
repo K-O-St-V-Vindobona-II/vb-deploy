@@ -8,6 +8,23 @@ Image=ghcr.io/k-o-st-v-vindobona-ii/vb-intern:latest
 AutoUpdate=registry
 EnvironmentFile=%h/.env/vb-intern.env
 
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+# CAP_NET_BIND_SERVICE for the master process binding port 80; nginx then
+# drops its worker processes to the unprivileged "nginx" user itself
+# (the "user nginx;" directive), which needs CAP_CHOWN (to hand the temp
+# dirs below to that user) and CAP_SETUID/CAP_SETGID (the actual drop) -
+# live-verified, workers fail to start without these three.
+AddCapability=CAP_NET_BIND_SERVICE CAP_CHOWN CAP_SETUID CAP_SETGID
+
+# /run holds nginx's PID file and the runtime-rendered config.js (see
+# docker/docker-entrypoint.d/40-generate-runtime-config.sh in the app
+# repo); /var/cache/nginx holds its request-buffering temp dirs.
+Mount=type=tmpfs,target=/run,tmpfs-mode=1777,tmpfs-size=16m
+Mount=type=tmpfs,target=/var/cache/nginx,tmpfs-mode=0755,tmpfs-size=16m
+
 HealthCmd=wget -qO- http://127.0.0.1/ || exit 1
 HealthInterval=30s
 HealthTimeout=5s

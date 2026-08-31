@@ -106,6 +106,21 @@ second user, `admin`, exists solely for administrative root tasks
   `intern.vindobona2.at/logging/dozzle` behind basic auth.
 - **podman-prune.timer** cleans up unused images/containers weekly, so the
   VPS's limited disk space doesn't fill up.
+- **Container hardening**: every production `.container` Quadlet carries
+  `ReadOnly=true`, `NoNewPrivileges=true`, `DropCapability=all`, plus
+  whatever `AddCapability=`/`Mount=type=tmpfs,...` lines that specific
+  image's own startup behavior actually needs (verified live per image,
+  not assumed) — Postgres and Valkey run directly as their mapped UID
+  (`User=999`, pre-chowned by the playbook) so their entrypoints skip the
+  root-only chown/privilege-drop step entirely and need no capabilities
+  back; Caddy/nginx-based frontends stay root to bind port 80/443
+  (`CAP_NET_BIND_SERVICE`), and nginx additionally needs
+  `CAP_CHOWN`/`CAP_SETUID`/`CAP_SETGID` to drop its own worker processes to
+  the unprivileged `nginx` user. `.pod`/`.volume` Quadlet units don't
+  support these keys at all (Container-section-only) and the local
+  dev Quadlets under `dev/quadlets/` are deliberately excluded — they bind-mount
+  live-editable source code, which is structurally incompatible with a
+  read-only rootfs.
 
 ## Complete Cutover / VPS Reinstall (Step-by-Step Runbook)
 
@@ -775,6 +790,22 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   `intern.vindobona2.at/logging/dozzle` hinter Basic-Auth.
 - **podman-prune.timer** räumt wöchentlich ungenutzte Images/Container auf,
   damit der begrenzte VPS-Plattenplatz nicht volläuft.
+- **Container-Härtung**: Jedes produktive `.container`-Quadlet trägt
+  `ReadOnly=true`, `NoNewPrivileges=true`, `DropCapability=all`, plus die
+  `AddCapability=`/`Mount=type=tmpfs,...`-Zeilen, die genau dieses Image
+  laut seinem tatsächlichen Startverhalten braucht (live pro Image
+  verifiziert, nicht angenommen) — Postgres und Valkey laufen direkt unter
+  ihrer gemappten UID (`User=999`, vom Playbook vorab gechownt), wodurch
+  ihre Entrypoints den root-only Chown-/Privilege-Drop-Schritt komplett
+  überspringen und keine Capabilities zurückbrauchen; Caddy/nginx-basierte
+  Frontends bleiben root, um Port 80/443 zu binden
+  (`CAP_NET_BIND_SERVICE`), nginx braucht zusätzlich
+  `CAP_CHOWN`/`CAP_SETUID`/`CAP_SETGID`, um seine eigenen Worker-Prozesse
+  auf den unprivilegierten `nginx`-User herunterzubrechen. `.pod`-/
+  `.volume`-Quadlets unterstützen diese Keys gar nicht (nur
+  Container-Section), und die lokalen Dev-Quadlets unter `dev/quadlets/`
+  sind bewusst ausgenommen — sie binden live-editierbaren Quellcode ein,
+  was mit einem Read-only-Rootfs strukturell unvereinbar ist.
 
 ## Kompletter Cutover / VPS-Neuaufsetzen (Schritt-für-Schritt-Runbook)
 

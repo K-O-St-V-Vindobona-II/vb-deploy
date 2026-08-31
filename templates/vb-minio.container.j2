@@ -10,6 +10,17 @@ Exec=server /data --console-address ":9001"
 EnvironmentFile=%h/.env/vb-minio.env
 Volume=%h/data/vb/{{ app_environment }}/minio:/data:Z
 
+# --- SECURITY HARDENING ---
+# Unlike Postgres/Valkey, MinIO's own image has no chown/privilege-drop
+# mechanism at all (it just runs as whichever user starts it), so no
+# capabilities need to be added back here.
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# MINIO_CONFIG_ENV_FILE/the bundled "mc" client write scratch state here.
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=32m
+
 HealthCmd=curl -sf http://localhost:9000/minio/health/live || exit 1
 HealthInterval=30s
 HealthTimeout=5s

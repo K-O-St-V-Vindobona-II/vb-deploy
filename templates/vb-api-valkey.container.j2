@@ -10,6 +10,19 @@ EnvironmentFile=%h/.env/vb-api-valkey.env
 Exec=sh -c 'exec valkey-server --requirepass "$VALKEY_PASSWORD" --appendonly no --save ""'
 Volume=%h/data/vb/{{ app_environment }}/valkey:/data:Z
 
+# --- SECURITY HARDENING ---
+# Same reasoning as vb-api-pg.container.j2: the playbook pre-chowns /data
+# to UID 999 (see "Ensure Valkey data directory ownership" in deploy.yml),
+# the official entrypoint only chowns its working directory and re-execs
+# via setpriv when run as root - started directly as UID 999, it skips
+# both, so no capabilities need to be added back.
+User=999
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=16m
+
 HealthCmd=valkey-cli -a "$VALKEY_PASSWORD" ping || exit 1
 HealthInterval=10s
 HealthTimeout=5s

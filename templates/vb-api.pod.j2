@@ -25,6 +25,14 @@ PublishPort=127.0.0.1:9001:9001
 # (e.g. to Google's cert endpoint during Google Login) without ever erroring
 # or timing out on its own. Nothing in this stack needs outbound IPv6.
 Network=pasta:-4
+# Quadlet defaults pods to ExitPolicy=stop, which exits the pod
+# cleanly (exit code 0) once its last container disappears - podman
+# auto-update relies on exactly that (stop+recreate one container),
+# and a clean exit does not trigger the pod's own Restart=on-failure.
+# continue keeps the pod (and its infra container) alive so the
+# recreated container can rejoin it instead of hitting "Dependency
+# failed".
+ExitPolicy=continue
 
 [Install]
 WantedBy=default.target

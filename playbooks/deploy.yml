@@ -4,7 +4,8 @@
 # repos, restores NO data - none of that is this playbook's job anymore
 # (see the "Ansible/deployment rebuilt" plan for the rationale: the three
 # app images already arrive fully built from ghcr.io and get rolled out
-# automatically by the already-active podman-auto-update.timer).
+# automatically by podman-auto-update.timer, which this playbook itself
+# enables + starts below).
 #
 # Multi-stage: -i selects the stage, there is no default inventory.
 #
@@ -304,6 +305,15 @@
       ansible.builtin.systemd:
         scope: user
         name: podman-prune.timer
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Enable + start podman-auto-update.timer
+      ansible.builtin.systemd:
+        scope: user
+        name: podman-auto-update.timer
         enabled: yes
         state: started
       environment:

@@ -514,10 +514,34 @@ ansible-playbook -i inventory/<stage>.ini playbooks/deploy.yml --ask-vault-pass 
 ```
 
 Pulls the current `:latest` image of the respective service from ghcr.io
-and restarts the associated **pod** (not just the individual container —
-the container is bound to its pod via a generated `BindsTo=`, so a plain
-container restart would take the pod down with it without it pulling
-itself back up on its own). Only runs when the tag is explicitly given.
+and restarts the associated **pod** (not just the individual container).
+Only runs when the tag is explicitly given.
+
+### Nightly Auto-Update (Pod-Aware)
+
+`podman-auto-update.timer` runs daily on every stage (`enabled` +
+started by the Day-2 deploy above) and updates any container labeled
+`AutoUpdate=registry` to the current `:latest` image from ghcr.io - no
+manual playbook run required for routine updates.
+
+All three pod Quadlets set `ExitPolicy=continue`. Quadlet defaults pods
+to `ExitPolicy=stop`, which exits the pod cleanly (exit code 0) once
+its last container disappears - exactly what auto-update does when it
+stops+recreates one container - and a clean exit never triggers the
+pod's own `Restart=on-failure`. Without `continue`, a nightly
+auto-update run would take the whole pod down permanently, with no
+automatic recovery.
+
+**Gotcha when changing pod-level Quadlet options** (like
+`ExitPolicy=`): the `state: started` step in `deploy.yml` is a no-op on
+an already-running pod - it does **not** re-create the pod with the
+new options, since those only apply at `podman pod create` time. A pod
+that was already running when such an option changes keeps its old
+creation options until the pod unit itself is explicitly restarted
+(`systemctl --user restart <name>-pod.service`, which recreates it via
+`podman pod create --replace`). Restarting just a member container
+instead still runs against the stale pod config and can reproduce the
+exact failure the option change was meant to fix.
 
 ## Operational Scripts in `vb-api`
 
@@ -1222,10 +1246,36 @@ ansible-playbook -i inventory/<stage>.ini playbooks/deploy.yml --ask-vault-pass 
 ```
 
 Pullt das aktuelle `:latest`-Image des jeweiligen Services aus ghcr.io und
-startet den zugehörigen **Pod** neu (nicht nur den einzelnen Container — der
-Container ist per generiertem `BindsTo=` an seinen Pod gebunden, ein reiner
-Container-Neustart würde den Pod mitreißen, ohne dass er sich von selbst
-wieder hochzieht). Läuft nur, wenn der Tag explizit angegeben wird.
+startet den zugehörigen **Pod** neu (nicht nur den einzelnen Container).
+Läuft nur, wenn der Tag explizit angegeben wird.
+
+### Nächtliches Auto-Update (Pod-Aware)
+
+`podman-auto-update.timer` läuft täglich auf jeder Stage (`enabled` +
+gestartet durch den Tag-2-Deploy oben) und aktualisiert jeden Container
+mit dem Label `AutoUpdate=registry` auf das aktuelle `:latest`-Image aus
+ghcr.io — kein manueller Playbook-Lauf für routinemäßige Updates nötig.
+
+Alle drei Pod-Quadlets setzen `ExitPolicy=continue`. Quadlet setzt für
+Pods standardmäßig `ExitPolicy=stop`, wodurch sich der Pod sauber
+(Exit-Code 0) beendet, sobald sein letzter Container verschwindet —
+genau das tut Auto-Update, wenn es einen Container stoppt+neu erstellt
+— und ein sauberer Exit löst das `Restart=on-failure` des Pods selbst
+nie aus. Ohne `continue` würde ein nächtlicher Auto-Update-Lauf den
+kompletten Pod dauerhaft lahmlegen, ohne automatische Wiederherstellung.
+
+**Falle beim Ändern von Pod-Level-Quadlet-Optionen** (wie
+`ExitPolicy=`): Der `state: started`-Schritt in `deploy.yml` ist bei
+einem bereits laufenden Pod ein No-Op — er erstellt den Pod **nicht**
+mit den neuen Optionen neu, da diese nur beim `podman pod create`
+selbst greifen. Ein Pod, der bereits lief, als sich so eine Option
+geändert hat, behält seine alten Erstellungs-Optionen, bis die
+Pod-Unit selbst explizit neu gestartet wird (`systemctl --user restart
+<name>-pod.service`, was ihn per `podman pod create --replace` neu
+erstellt). Ein Neustart nur eines einzelnen Mitglieds-Containers läuft
+weiterhin gegen die veraltete Pod-Konfiguration und kann exakt den
+Fehler reproduzieren, den die Options-Änderung eigentlich beheben
+sollte.
 
 ## Operative Skripte in `vb-api`
 

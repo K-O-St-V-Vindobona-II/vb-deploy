@@ -524,16 +524,21 @@ started by the Day-2 deploy above) and updates any container labeled
 `AutoUpdate=registry` to the current `:latest` image from ghcr.io - no
 manual playbook run required for routine updates.
 
-All three pod Quadlets set `ExitPolicy=continue`. Quadlet defaults pods
-to `ExitPolicy=stop`, which exits the pod cleanly (exit code 0) once
-its last container disappears - exactly what auto-update does when it
-stops+recreates one container - and a clean exit never triggers the
-pod's own `Restart=on-failure`. Without `continue`, a nightly
-auto-update run would take the whole pod down permanently, with no
-automatic recovery.
+All three pod Quadlets set the pod's exit policy to `continue` via
+`PodmanArgs=--exit-policy=continue` rather than the dedicated
+`ExitPolicy=` Quadlet key (only added in Podman 5.6 - the underlying
+`--exit-policy` flag on `podman pod create` predates it by a lot, and
+`PodmanArgs` has supported the `[Pod]` section since early Quadlet
+versions, so this keeps working on distributions whose packaged Podman
+is older). Quadlet defaults pods to `stop`, which exits the pod cleanly
+(exit code 0) once its last container disappears - exactly what
+auto-update does when it stops+recreates one container - and a clean
+exit never triggers the pod's own `Restart=on-failure`. Without
+`continue`, a nightly auto-update run would take the whole pod down
+permanently, with no automatic recovery.
 
-**Gotcha when changing pod-level Quadlet options** (like
-`ExitPolicy=`): the `state: started` step in `deploy.yml` is a no-op on
+**Gotcha when changing pod-level Quadlet options** (like the exit
+policy above): the `state: started` step in `deploy.yml` is a no-op on
 an already-running pod - it does **not** re-create the pod with the
 new options, since those only apply at `podman pod create` time. A pod
 that was already running when such an option changes keeps its old
@@ -1253,16 +1258,22 @@ gestartet durch den Tag-2-Deploy oben) und aktualisiert jeden Container
 mit dem Label `AutoUpdate=registry` auf das aktuelle `:latest`-Image aus
 ghcr.io — kein manueller Playbook-Lauf für routinemäßige Updates nötig.
 
-Alle drei Pod-Quadlets setzen `ExitPolicy=continue`. Quadlet setzt für
-Pods standardmäßig `ExitPolicy=stop`, wodurch sich der Pod sauber
+Alle drei Pod-Quadlets setzen die Exit-Policy des Pods auf `continue`
+über `PodmanArgs=--exit-policy=continue` statt über den dedizierten
+Quadlet-Schlüssel `ExitPolicy=` (der erst mit Podman 5.6 hinzukam — das
+zugrundeliegende `--exit-policy`-Flag von `podman pod create` gibt es
+schon deutlich länger, und `PodmanArgs` unterstützt den `[Pod]`-
+Abschnitt bereits seit frühen Quadlet-Versionen, wodurch das auch auf
+Distributionen mit älterem, paketiertem Podman funktioniert). Quadlet
+setzt für Pods standardmäßig `stop`, wodurch sich der Pod sauber
 (Exit-Code 0) beendet, sobald sein letzter Container verschwindet —
 genau das tut Auto-Update, wenn es einen Container stoppt+neu erstellt
 — und ein sauberer Exit löst das `Restart=on-failure` des Pods selbst
 nie aus. Ohne `continue` würde ein nächtlicher Auto-Update-Lauf den
 kompletten Pod dauerhaft lahmlegen, ohne automatische Wiederherstellung.
 
-**Falle beim Ändern von Pod-Level-Quadlet-Optionen** (wie
-`ExitPolicy=`): Der `state: started`-Schritt in `deploy.yml` ist bei
+**Falle beim Ändern von Pod-Level-Quadlet-Optionen** (wie der
+Exit-Policy oben): Der `state: started`-Schritt in `deploy.yml` ist bei
 einem bereits laufenden Pod ein No-Op — er erstellt den Pod **nicht**
 mit den neuen Optionen neu, da diese nur beim `podman pod create`
 selbst greifen. Ein Pod, der bereits lief, als sich so eine Option

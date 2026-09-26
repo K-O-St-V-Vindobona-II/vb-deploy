@@ -255,7 +255,8 @@ that. `playbooks/deploy.yml` refuses any other value via an `assert` task.
    domains instead of the `CHANGEME.example.invalid` placeholders — the
    usual `api`/`intern`/`www` plus `storage_domain` (MinIO's S3 API, see
    [MinIO on Non-Production Stages](#minio-on-non-production-stages)
-   below).
+   below). Also set `acme_email`, the contact address the stage's
+   certificate account is registered with.
 2. `secrets/<stage>/` already exists as a skeleton with independently,
    freshly generated required values (`SECRET_KEY`, Postgres password,
    Caddy basic-auth hash, this stage's own MinIO root credentials) — this
@@ -970,7 +971,8 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
    Domains eintragen statt der `CHANGEME.example.invalid`-Platzhalter —
    die üblichen `api`/`intern`/`www` plus `storage_domain` (MinIOs
    S3-API, siehe [MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
-   unten).
+   unten). Zusätzlich `acme_email` setzen, die Kontaktadresse, mit der das
+   Zertifikatskonto der Stage registriert wird.
 2. `secrets/<stage>/` existiert bereits als Skeleton mit unabhängig frisch
    generierten Pflichtwerten (`SECRET_KEY`, Postgres-Passwort,
    Caddy-Basic-Auth-Hash, den eigenen MinIO-Root-Credentials dieser

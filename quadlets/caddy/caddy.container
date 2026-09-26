@@ -31,8 +31,9 @@ Volume=%h/.local/share/caddy/caddy_data:/data
 Volume=caddy-config.volume:/config
 
 # --- HEALTHCHECK ---
+# Loopback-only listener defined in the Caddyfile (the admin API is disabled).
 Notify=healthy
-HealthCmd=wget -q -O - http://127.0.0.1:2019/config/ >/dev/null || exit 1
+HealthCmd=wget -q -O - http://127.0.0.1:2020/ >/dev/null || exit 1
 HealthInterval=30s
 HealthTimeout=5s
 HealthStartPeriod=10s

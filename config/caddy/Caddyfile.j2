@@ -1,30 +1,113 @@
 {
-	email vindobona2.webaccess@gmail.com
+	email {{ acme_email }}
+	# The admin API is unauthenticated and, with host networking, reachable by every
+	# process on the host. Nothing needs it at runtime: configuration changes are
+	# applied by restarting the unit and the health check uses the loopback
+	# listener below.
+	admin off
 	# Disables HTTP/3 (QUIC) and uses only TCP-based protocols
 	servers {
 		protocols h1 h2
 	}
 }
 
+# Loopback-only liveness endpoint for the container health check.
+http://127.0.0.1:2020 {
+	bind 127.0.0.1
+	respond "ok" 200
+}
+
+# Baseline for every public site: HSTS and no server banner. The upstream
+# banner is removed per proxy with header_down.
+(edge_baseline) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# vb-intern hardening: browser headers plus a Content-Security-Policy scoped to
+# what the app loads (its own bundle, the Google sign-in script and frame, the
+# API origin). img-src and media-src are enforced but deliberately broad
+# ("https:") instead of pinned to one origin: archive and standesdb images are
+# fetched from presigned storage URLs, and the origin of the production object
+# storage lives in vault-encrypted values that are not visible in this file.
+# The Report-Only header carries the tight, intended target, so a browser
+# console shows every origin the broad allowance still permits, without
+# blocking anything. Once the production storage origin is confirmed, add it
+# to the enforcing header, drop the broad "https:" and remove the second header.
+(intern_hardening) {
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline'; connect-src 'self' https://{{ api_domain }} https://accounts.google.com; frame-src https://accounts.google.com; img-src 'self' data: https:; media-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		Content-Security-Policy-Report-Only "default-src 'self'; img-src 'self' data:{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}; media-src 'self'{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}"
+	}
+}
+
+# vb-www hardening: the same browser headers plus a Content-Security-Policy
+# scoped to what the public site loads: its own script, stylesheet and fonts,
+# the API for fetch(), the gallery images from presigned storage URLs and the
+# three frames embedded on the page (video, calendar, map). img-src is enforced
+# as "https:" for the reason given at (intern_hardening); the Report-Only header
+# carries the tight target.
+(www_hardening) {
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https:; font-src 'self'; connect-src https://{{ api_domain }}; frame-src https://www.youtube-nocookie.com https://calendar.google.com https://www.openstreetmap.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+		Content-Security-Policy-Report-Only "default-src 'none'; img-src 'self'{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}"
+	}
+}
+
 {{ intern_domain }} {
-	basic_auth /logging* {
-		{$LOGGING_USER} {$LOGGING_PASSWORD_HASH}
+	import edge_baseline
+	import intern_hardening
+
+	# Access log for the log-viewer paths only. Application traffic is skipped so
+	# that query strings containing personal data never reach the edge log.
+	@not_logging not path /logging*
+	log_skip @not_logging
+	log
+
+	route /logging* {
+{% if logging_allowed_cidrs | default([]) %}
+		@logging_forbidden not remote_ip {{ logging_allowed_cidrs | join(' ') }}
+		respond @logging_forbidden 403
+{% endif %}
+		basic_auth {
+			{$LOGGING_USER} {$LOGGING_PASSWORD_HASH}
+		}
+		reverse_proxy /logging/dozzle* 127.0.0.1:8081
 	}
-	handle /logging/dozzle* {
-		reverse_proxy 127.0.0.1:8081
-	}
+
 	reverse_proxy 127.0.0.1:21001 {
 		header_down -Server
 	}
 }
 
 {{ api_domain }} {
+	import edge_baseline
+
+	# Hard upper bound for any request body. Larger uploads are rejected here,
+	# before the application buffers them.
+	request_body {
+		max_size {{ api_max_request_body | default('25MB') }}
+	}
+
 	reverse_proxy 127.0.0.1:21000 {
 		header_down -Server
 	}
 }
 
 {{ www_domain }} {
+	import edge_baseline
+	import www_hardening
+
 	reverse_proxy 127.0.0.1:21002 {
 		header_down -Server
 	}
@@ -32,6 +115,8 @@
 
 {% if app_environment != 'production' %}
 {{ storage_domain }} {
+	import edge_baseline
+
 	reverse_proxy 127.0.0.1:9000 {
 		header_down -Server
 	}

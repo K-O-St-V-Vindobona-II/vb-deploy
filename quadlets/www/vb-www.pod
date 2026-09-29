@@ -4,7 +4,7 @@ Before=vb-www.service
 
 [Pod]
 PodName=vb-www-pod
-PublishPort=127.0.0.1:21002:80
+PublishPort=127.0.0.1:21002:8080
 # Quadlet defaults pods to ExitPolicy=stop, which exits the pod
 # cleanly (exit code 0) once its last container disappears - podman
 # auto-update relies on exactly that (stop+recreate one container),

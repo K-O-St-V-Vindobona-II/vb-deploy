@@ -113,10 +113,11 @@ second user, `admin`, exists solely for administrative root tasks
   not assumed) — Postgres and Valkey run directly as their mapped UID
   (`User=999`, pre-chowned by the playbook) so their entrypoints skip the
   root-only chown/privilege-drop step entirely and need no capabilities
-  back; Caddy/nginx-based frontends stay root to bind port 80/443
-  (`CAP_NET_BIND_SERVICE`), and nginx additionally needs
-  `CAP_CHOWN`/`CAP_SETUID`/`CAP_SETGID` to drop its own worker processes to
-  the unprivileged `nginx` user. `.pod`/`.volume` Quadlet units don't
+  back; the nginx frontends (`vb-intern`, `vb-www`) run the
+  `nginx-unprivileged` image (uid 101 for master and workers, port 8080,
+  PID file and temp directories on a `/tmp` tmpfs) and need no capability
+  at all; only Caddy adds `CAP_NET_BIND_SERVICE` back to bind port 80/443.
+  `.pod`/`.volume` Quadlet units don't
   support these keys at all (Container-section-only) and the local
   dev Quadlets under `dev/quadlets/` are deliberately excluded — they bind-mount
   live-editable source code, which is structurally incompatible with a
@@ -146,7 +147,16 @@ The runbook is implicitly production; for a new test/QA stage, see
 
 **1. Install a new operating system.** Debian (current stable version),
 UEFI instead of BIOS/legacy (modern standard, no downsides on common
-cloud/VPS providers).
+cloud/VPS providers). `setup_vps.yml` also has branches for the RedHat
+family and SUSE; a complete first installation (setup, deploy, database
+restore, reboot) has been verified on Debian 13, on Rocky Linux 10 and on
+openSUSE Leap 16.0, the last two with SELinux enforcing. Podman 5 or newer is
+required, older releases (Debian 12, Ubuntu 24.04, RHEL 9, openSUSE Leap 15)
+are refused by the playbook. Where SELinux is enforcing, the bind mounts of
+the Quadlets carry a `:Z`/`:z` label and Dozzle runs without label
+confinement, see the comments in `quadlets/`. Automatic security updates are
+set up on every family (unattended-upgrades, dnf-automatic, and a daily
+`zypper patch` timer on SUSE); a pending reboot stays a manual decision.
 
 **2. Establish root access.**
 - If an SSH public key was already deposited during the reinstall: direct
@@ -230,12 +240,12 @@ empty database (no members, no data).
   request fails. That means a complete outage for all three apps (Caddy
   needs the certificate to terminate HTTPS at all) and the risk of hitting
   Let's Encrypt's rate limits on repeated failed attempts.
-- **Disk space on non-production stages:** these run their own MinIO
-  instance (see [MinIO on Non-Production Stages](#minio-on-non-production-stages)
+- **Disk space on non-production stages:** these run their own Garage
+  instance (see [Garage on Non-Production Stages](#garage-on-non-production-stages)
   below) to hold a full downsynced mirror of the production S3 bucket.
   That mirror alone is currently (2026-08-27) ~41GB and only grows over
-  time — provision at least ~50GB free for `~/data/vb/<stage>/minio` on
-  any `test`/`qa` VPS, on top of the OS/Postgres footprint.
+  time — provision at least ~50GB free for `~/data/vb/<stage>/garage-data`
+  on any `test`/`qa` VPS, on top of the OS/Postgres footprint.
 
 ## Stages
 
@@ -253,36 +263,37 @@ that. `playbooks/deploy.yml` refuses any other value via an `assert` task.
 
 1. Fill in `inventory/<stage>.ini`: enter the real hostname and all **four**
    domains instead of the `CHANGEME.example.invalid` placeholders — the
-   usual `api`/`intern`/`www` plus `storage_domain` (MinIO's S3 API, see
-   [MinIO on Non-Production Stages](#minio-on-non-production-stages)
+   usual `api`/`intern`/`www` plus `storage_domain` (Garage's S3 API, see
+   [Garage on Non-Production Stages](#garage-on-non-production-stages)
    below). Also set `acme_email`, the contact address the stage's
    certificate account is registered with.
-2. `secrets/<stage>/` already exists as a skeleton with independently,
-   freshly generated required values (`SECRET_KEY`, Postgres password,
-   Caddy basic-auth hash, this stage's own MinIO root credentials) — this
-   stage's storage is its own MinIO instance, already fully wired up, not
-   real AWS S3. SMTP and `GOOGLE_CLIENT_ID` values are deliberately empty,
-   since no real mail server/OAuth app exists yet for this stage. Fill
-   them in before production use (see
+2. Create `secrets/<stage>/` from the `*.example` files next to it and
+   encrypt every real file with the vault (see
    [Maintaining Secrets](#maintaining-secrets), which also has the full
    [required-variables table](#required-env-variables-per-stage-type)).
-   The same file also already takes `AWS_ACCESS_KEY_ID`/
-   `AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION` — a read-only IAM
-   user scoped to the **prod** bucket only, distinct from the `S3_*`
-   fields above (which target this stage's own MinIO). No manual,
-   out-of-band file involved; it's vault-encrypted like everything else
-   here.
+   Generate every required value fresh for this stage (`SECRET_KEY`,
+   Postgres and Valkey password, Caddy basic-auth hash, this stage's own
+   Garage credentials); this stage's storage is its own Garage instance,
+   not real AWS S3. SMTP and `GOOGLE_CLIENT_ID` stay empty until a real
+   mail server and OAuth app exist for this stage. The downsync job
+   additionally needs `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+   `AWS_BUCKET` and `AWS_REGION` of a read-only IAM user (`s3:ListBucket`
+   and `s3:GetObject` on the production bucket) that is created for this
+   stage alone and restricted to the stage's server address with an
+   `aws:SourceIp` condition; never copy the key of another stage. The
+   production bucket also holds the database backups, so this key can read
+   a complete dump of all members' data.
 3. Set DNS for all four domains of this stage (see
    [Prerequisites](#prerequisites) above).
 4. `playbooks/setup_vps.yml`, then `playbooks/deploy.yml`, each with
    `-i inventory/<stage>.ini` (see [Phase 1](#phase-1--vps-base-configuration-only-needed-for-a-fresh-setup)/[Phase 2](#phase-2--day-2-operations)).
-   This also brings up the stage's own MinIO and fixes the Postgres
+   This also brings up the stage's own Garage and fixes the Postgres
    data-directory ownership automatically — no manual steps needed.
 5. To see real data instead of an empty database: trigger a downsync —
    either the "Downsync now" button in `vb-intern` (System → Scheduler),
    or `podman exec vb-api python scripts/downsync_prod.py --yes` over SSH
    (see [Operational Scripts](#operational-scripts-in-vb-api)). Mirrors
-   the full production S3 bucket into this stage's MinIO and restores the
+   the full production S3 bucket into this stage's Garage and restores the
    local database from it — see the disk space note in
    [Prerequisites](#prerequisites).
 
@@ -337,9 +348,9 @@ stage type, independent of that stage's provisioning status — they
 document the target structure, not the current rollout state. Five files
 are shared by every stage (`caddy.env.example`, `vb-api.env.j2.example`,
 `vb-api-pg.env.example`, `vb-intern.env.j2.example`,
-`vb-www.env.j2.example`); `vb-minio.env.j2.example` exists only under
+`vb-www.env.j2.example`); `vb-garage.env.j2.example` exists only under
 `test/`/`qa/` (production uses real AWS S3 instead, see
-[MinIO on Non-Production Stages](#minio-on-non-production-stages) below).
+[Garage on Non-Production Stages](#garage-on-non-production-stages) below).
 The real, vault-encrypted files exist only for stages that actually have a
 host behind them; a stage still at the "Skeleton, no dedicated VPS yet"
 status (see [Stages](#stages)) only has the templates, not the real
@@ -348,7 +359,7 @@ files, until it is actually set up.
 ### Required `.env` Variables per Stage Type
 
 Which variables actually need a real value differs between production
-(real AWS S3/SMTP/Google) and `test`/`qa` (own MinIO, no mail server/OAuth
+(real AWS S3/SMTP/Google) and `test`/`qa` (own Garage, no mail server/OAuth
 app by default). "Optional" means the setting has a working default in
 `app/core/config.py` if left unset.
 
@@ -357,44 +368,59 @@ app by default). "Optional" means the setting has a working default in
 | `caddy.env` | `LOGGING_USER`, `LOGGING_PASSWORD_HASH` | required | required |
 | `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | required | required |
 | `vb-api.env.j2` | `SECRET_KEY` | required | required |
-| `vb-api.env.j2` | `DATABASE_URL` | required | required |
+| `vb-api.env.j2` | `DATABASE_URL` | required (the `vb_app` role split off from the bootstrap superuser, see `config/postgres/split-app-role.sql`) | required |
 | `vb-api.env.j2` | `VALKEY_URL` | required (ARQ worker/background tasks) | required |
 | `vb-api-valkey.env` | `VALKEY_PASSWORD` | required (must match `vb-api.env.j2`'s `VALKEY_URL`) | required |
-| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | required (real AWS credentials) | required (this stage's MinIO root credentials) |
+| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | required (real AWS credentials) | required (this stage's Garage access key, matching `vb-garage.env.j2`'s `GARAGE_DEFAULT_ACCESS_KEY`/`GARAGE_DEFAULT_SECRET_KEY`) |
 | `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | not set (defaults to real AWS) | required (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
-| `vb-api.env.j2` | `S3_REGION` | required (`eu-central-1`) | optional (MinIO ignores it; `us-east-1` default) |
+| `vb-api.env.j2` | `S3_REGION` | required (`eu-central-1`) | required (`us-east-1`, must match `config/garage/garage.toml`'s `s3_region` — Garage checks it) |
 | `vb-api.env.j2` | `S3_PATH_*` | optional (sensible defaults) | optional (sensible defaults) |
 | `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | not applicable (downsync refuses to run on production) | required for the downsync job/button (read-only prod-bucket credentials) |
 | `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | required (`true` + a real schedule) | optional (`false` — a disposable stage's own backups have little value) |
 | `vb-api.env.j2` | `SMTP_*` | required (real mail delivery) | not set (no mail server for this stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | required (Google Login) | not set (no OAuth app for this stage) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | required | not set |
-| `vb-minio.env.j2` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | file doesn't exist on production | required |
+| `vb-garage.env.j2` | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, `GARAGE_DEFAULT_BUCKET` | file doesn't exist on production | required |
 
-### MinIO on Non-Production Stages
+### Garage on Non-Production Stages
 
-`test`/`qa` run their own [MinIO](https://min.io/) instance as an
-S3-compatible stand-in for real AWS S3 — production keeps using the real
-`vindobona2-at` AWS bucket directly, it never runs MinIO. MinIO joins
-`vb-api`'s own pod (`templates/vb-api.pod.j2` — its `Wants=`/`Before=` on
-`vb-minio.service` and its two published MinIO ports only appear outside
-production) rather than getting a pod of its own — exactly like the
-existing `vb-api-pg` Postgres container, it shares `vb-api`'s network
-namespace, so `vb-api` reaches it over plain `localhost`. This is not
-just convenience: internal `vb-api`↔MinIO traffic **must** stay inside
-that shared pod network and never round-trip through Caddy/the public
-internet. A separate pod would only be reachable from another pod via its
-public domain — rootless Podman's `pasta` networking gives every pod its
-own private loopback, so `127.0.0.1` from one pod cannot reach a
-`127.0.0.1`-bound port published by a *different* pod on the same host,
-and routing server-side traffic through the public domain instead fails
-the same way (self-referential public IP, no hairpin NAT here).
-`templates/vb-minio.container.j2` (the data-directory path depends on the
-stage, exactly like Postgres's own volume) carries `Pod=vb-api.pod`
-accordingly. `vb-api`'s own `StorageClient` creates the `vindobona2-at`
-bucket inside MinIO on first access if it doesn't exist yet
-(`ensure_bucket_exists()`, only outside production) — no manual bucket
-setup needed.
+`test`/`qa` run their own [Garage](https://garagehq.deuxfleurs.fr/) instance
+as an S3-compatible stand-in for real AWS S3 — production keeps using the
+real `vindobona2-at` AWS bucket directly, it never runs Garage. Garage joins `vb-api`'s own pod (`templates/vb-api.pod.j2` — its
+`Wants=`/`Before=` on `vb-garage.service` and its two published Garage
+ports only appear outside production) rather than getting a pod of its
+own — exactly like the existing `vb-api-pg` Postgres container, it shares
+`vb-api`'s network namespace, so `vb-api` reaches it over plain
+`localhost`. This is not just convenience: internal `vb-api`↔Garage
+traffic **must** stay inside that shared pod network and never round-trip
+through Caddy/the public internet. A separate pod would only be reachable
+from another pod via its public domain — rootless Podman's `pasta`
+networking gives every pod its own private loopback, so `127.0.0.1` from
+one pod cannot reach a `127.0.0.1`-bound port published by a *different*
+pod on the same host, and routing server-side traffic through the public
+domain instead fails the same way (self-referential public IP, no hairpin
+NAT here). `templates/vb-garage.container.j2` (the data-directory paths
+depend on the stage, exactly like Postgres's own volume) carries
+`Pod=vb-api.pod` accordingly.
+
+Garage's own `--single-node --default-bucket` startup flags create the
+`GARAGE_DEFAULT_BUCKET` bucket and an S3 access key for it automatically
+on first start — no manual bucket setup needed. `deploy.yml` sets one
+thing that flag cannot: the bucket's CORS policy, so a browser can read a
+presigned URL's response cross-origin. It does so through `vb-api`'s own
+`boto3` (`podman exec vb-api python3 -c ...`, the real S3
+`PutBucketCors` call — Garage's *admin* API also accepts a CORS update
+and answers success, but empirically does not actually persist it),
+re-applied on every deploy since it is a "set", not an "add" — cheap, and
+self-healing if the bucket was ever recreated by hand.
+
+The application's S3 key is not an administrator: it can read and write
+this one bucket only, and `deploy.yml` also removes its right to create
+further buckets (`garage key deny --create-bucket`, harmless to repeat).
+The admin API and the cluster use their own secrets
+(`GARAGE_ADMIN_TOKEN`, `GARAGE_RPC_SECRET`), which the application never
+sees, and the access key of a presigned URL, which every browser can read,
+therefore opens nothing but this bucket.
 
 **Two ports, two very different exposure levels:**
 - **9000 (S3 API) — public, behind Caddy+TLS on `storage_domain`.**
@@ -402,16 +428,18 @@ setup needed.
   fetches directly (profile images, archive downloads, gallery pictures) —
   those can't resolve `127.0.0.1`, so the API port has to be genuinely
   internet-reachable, same as `api`/`intern`/`www`. `vb-api` itself never
-  uses that public route: it talks to MinIO over the shared pod network
+  uses that public route: it talks to Garage over the shared pod network
   (`S3_ENDPOINT_URL=http://127.0.0.1:9000`, see above);
   `S3_PUBLIC_ENDPOINT_URL` is the one presigned URLs actually use.
-- **9001 (web console) — loopback-only, no Caddy route.** Rarely needed
-  (if ever, once right after setup) — reach it via an SSH tunnel instead
-  of carrying a permanent public endpoint and its own basic-auth secret
-  for something this infrequently used:
+- **9001 (admin API) — loopback-only, no Caddy route.** Bucket/CORS
+  management and the health check only (see above and
+  `templates/vb-garage.container.j2`'s `HealthCmd`) — reach it via an SSH
+  tunnel if you ever need it by hand instead of carrying a permanent
+  public endpoint for something this infrequently used:
   ```bash
   ssh -L 9001:localhost:9001 service@<stage-host>
-  # then open http://localhost:9001 in your own browser
+  # then GET http://localhost:9001/v2/... with an Authorization: Bearer
+  # header carrying this stage's GARAGE_ADMIN_TOKEN
   ```
 
 **Disk space:** see [Prerequisites](#prerequisites) above — a downsynced
@@ -429,14 +457,14 @@ durable, Valkey-backed queue instead of FastAPI's in-process
 or restarts mid-task, e.g. during a deploy). `vb-api-worker` reuses the
 exact same `vb-api` image — no separate Dockerfile/CI job — its Quadlet's
 `Exec=arq app.worker.WorkerSettings` simply overrides the image's default
-`gunicorn` command, the same mechanism `vb-minio.container.j2` already
-uses for MinIO's `Exec=server /data ...`.
+`gunicorn` command, the same mechanism `vb-garage.container.j2` already
+uses for Garage's `Exec=/garage server ...`.
 
 Its [Valkey](https://valkey.io/) dependency (`vb-api-valkey` — a fully
 open-source, wire-compatible Redis fork; arq's client library itself
 still speaks the Redis wire protocol, hence `redis://` connection URLs
 and `arq.connections.RedisSettings` throughout the code) joins
-`vb-api.pod` for the exact same reason MinIO does (see above): internal
+`vb-api.pod` for the exact same reason Garage does (see above): internal
 traffic must stay inside the pod's shared network namespace, never
 round-trip through the public internet, and this is the same pattern
 `vb-api-pg` already establishes for a purely internal, same-pod
@@ -646,7 +674,7 @@ via its own Podman Quadlets. The generalized templates live under `dev/`:
 dev/quadlets/api/      vb-api + vb-api-pg + pod
 dev/quadlets/intern/   vb-intern
 dev/quadlets/www/      vb-www
-dev/quadlets/minio/    vb-minio (S3 replacement for AWS S3 in dev)
+dev/quadlets/garage/   vb-garage (S3 replacement for AWS S3 in dev)
 dev/env/               *.env.example for all five containers
 ```
 
@@ -654,18 +682,21 @@ dev/env/               *.env.example for all five containers
 
 1. Copy all `*.example` files from `dev/quadlets/` 1:1 to
    `~/.config/containers/systemd/vb/<component>/` (dropping the `.example`
-   extension), and all `*.example` files from `dev/env/` to `~/.env/`.
+   extension), and all `*.example` files from `dev/env/` to `~/.env/`. Also
+   copy `config/garage/garage.toml` from the repo root to wherever
+   `vb-garage.container`'s config volume points (see that file's own
+   comments — it needs no local edits, every stage uses the same one).
 2. Replace the placeholders in the copied Quadlets:
    `<path-to-vb-fastapi-vue>` (path to this 4-repo checkout),
-   `<your-mail-dev-domain>`/`<your-minio-dev-domain>` (see Caddy routing
-   below), `<path-to-local-minio-data-dir>`.
+   `<your-mail-dev-domain>`/`<your-garage-dev-domain>` (see Caddy routing
+   below), `<path-to-local-garage-meta-dir>`/`<path-to-local-garage-data-dir>`.
 3. Replace every `change-me` placeholder in the copied env files with real
    local values.
 
 ### Local Caddy Routing
 
 No separate Caddy dev container needed — the three frontend/backend ports
-(`20000`–`20002`) as well as MinIO (`9000`/`9001`) bind directly to
+(`20000`–`20002`) as well as Garage (`9000`/`9003`) bind directly to
 `127.0.0.1`. For a real domain name instead of `localhost:<port>` (e.g. to
 test cookies/CORS like in production), set up your own local DNS
 resolution + your own local reverse proxy:
@@ -678,12 +709,12 @@ local reverse proxy (your choice, e.g. Caddy)
    ├─ api.<your-dev-domain>    → 127.0.0.1:20000 → vb-api-pod
    ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern
    ├─ www.<your-dev-domain>    → 127.0.0.1:20002 → vb-www
-   └─ minio.<your-dev-domain>  → 127.0.0.1:9000  → vb-minio-pod
+   └─ garage.<your-dev-domain> → 127.0.0.1:9000  → vb-garage-pod
 ```
 
 Not part of this repo — the `AddHost=` lines in
-`vb-api.pod.example`/`vb-minio.pod.example` merely expect
-`<your-mail-dev-domain>`/`<your-minio-dev-domain>` to be resolvable
+`vb-api.pod.example`/`vb-garage.pod.example` merely expect
+`<your-mail-dev-domain>`/`<your-garage-dev-domain>` to be resolvable
 somehow (a simple local DNS/hosts entry is enough; a reverse proxy is only
 needed for domain-based browser testing).
 
@@ -695,7 +726,7 @@ needed for domain-based browser testing).
 podman build --target dev -t vb-api:dev <path-to-vb-fastapi-vue>/vb-api
 
 systemctl --user daemon-reload
-systemctl --user start vb-minio-pod vb-api-pod vb-intern vb-www
+systemctl --user start vb-garage-pod vb-api-pod vb-intern vb-www
 
 # Create the database schema:
 podman exec vb-api alembic upgrade head
@@ -703,7 +734,7 @@ podman exec vb-api alembic upgrade head
 
 **Seed data:** no separate seed script needed — `podman exec vb-api python
 scripts/downsync_prod.py --yes` pulls real production data (unchanged, no
-anonymization) from AWS S3 into the local MinIO instance and restores the
+anonymization) from AWS S3 into the local Garage instance and restores the
 local DB from it (`--yes` is required here since a plain `podman exec`
 without `-it` has no TTY for the interactive confirmation prompt). Needs
 `~/.env/vb-api-aws-prod.env` (see
@@ -827,11 +858,11 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   verifiziert, nicht angenommen) — Postgres und Valkey laufen direkt unter
   ihrer gemappten UID (`User=999`, vom Playbook vorab gechownt), wodurch
   ihre Entrypoints den root-only Chown-/Privilege-Drop-Schritt komplett
-  überspringen und keine Capabilities zurückbrauchen; Caddy/nginx-basierte
-  Frontends bleiben root, um Port 80/443 zu binden
-  (`CAP_NET_BIND_SERVICE`), nginx braucht zusätzlich
-  `CAP_CHOWN`/`CAP_SETUID`/`CAP_SETGID`, um seine eigenen Worker-Prozesse
-  auf den unprivilegierten `nginx`-User herunterzubrechen. `.pod`-/
+  überspringen und keine Capabilities zurückbrauchen; die nginx-Frontends
+  (`vb-intern`, `vb-www`) laufen mit dem `nginx-unprivileged`-Image (uid 101
+  für Master und Worker, Port 8080, PID-Datei und Temp-Verzeichnisse auf
+  einem `/tmp`-tmpfs) und brauchen gar keine Capability; nur Caddy holt
+  `CAP_NET_BIND_SERVICE` zurück, um Port 80/443 zu binden. `.pod`-/
   `.volume`-Quadlets unterstützen diese Keys gar nicht (nur
   Container-Section), und die lokalen Dev-Quadlets unter `dev/quadlets/`
   sind bewusst ausgenommen — sie binden live-editierbaren Quellcode ein,
@@ -860,7 +891,17 @@ ist implizit Production; für eine neue Test-/QA-Stage siehe [Stages](#stages-1)
 
 **1. Neues Betriebssystem installieren.** Debian (aktuelle stabile Version),
 UEFI statt BIOS/Legacy (moderner Standard, keine Nachteile bei gängigen
-Cloud-/VPS-Anbietern).
+Cloud-/VPS-Anbietern). `setup_vps.yml` hat außerdem Zweige für die
+RedHat-Familie und SUSE; eine vollständige Erstinstallation (Setup, Deploy,
+Datenbank-Restore, Reboot) wurde auf Debian 13, auf Rocky Linux 10 und auf
+openSUSE Leap 16.0 verifiziert, die beiden letzten mit SELinux im
+Enforcing-Modus. Podman 5 oder neuer ist Pflicht, ältere Releases (Debian 12,
+Ubuntu 24.04, RHEL 9, openSUSE Leap 15) lehnt das Playbook ab. Wo SELinux
+erzwungen wird, tragen die Bind-Mounts der Quadlets ein `:Z`/`:z`-Label und
+Dozzle läuft ohne Label-Einschränkung, siehe die Kommentare in `quadlets/`.
+Automatische Sicherheitsupdates sind auf jeder Familie eingerichtet
+(unattended-upgrades, dnf-automatic und auf SUSE ein täglicher
+`zypper patch`-Timer); ein nötiger Reboot bleibt eine manuelle Entscheidung.
 
 **2. Root-Zugriff herstellen.**
 - Falls beim Reinstall schon ein SSH-Public-Key hinterlegt wurde: direkter
@@ -946,12 +987,12 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
   überhaupt HTTPS zu terminieren) und das Risiko, bei wiederholten
   Fehlversuchen Let's-Encrypts Rate-Limits zu treffen.
 - **Plattenplatz auf Non-Production-Stages:** Diese betreiben eine eigene
-  MinIO-Instanz (siehe [MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+  Garage-Instanz (siehe [Garage auf Non-Production-Stages](#garage-auf-non-production-stages)
   unten), um einen vollständigen, per Downsync gespiegelten Stand des
   Produktions-S3-Buckets aufzunehmen. Allein dieser Spiegel ist aktuell
   (27.08.2026) ~41GB groß und wächst mit der Zeit weiter — für
-  `~/data/vb/<stage>/minio` auf jedem `test`/`qa`-VPS mindestens ~50GB
-  frei einplanen, zusätzlich zum OS-/Postgres-Bedarf.
+  `~/data/vb/<stage>/garage-data` auf jedem `test`/`qa`-VPS mindestens
+  ~50GB frei einplanen, zusätzlich zum OS-/Postgres-Bedarf.
 
 ## Stages
 
@@ -969,31 +1010,33 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
 
 1. `inventory/<stage>.ini` befüllen: echten Hostnamen und alle **vier**
    Domains eintragen statt der `CHANGEME.example.invalid`-Platzhalter —
-   die üblichen `api`/`intern`/`www` plus `storage_domain` (MinIOs
-   S3-API, siehe [MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+   die üblichen `api`/`intern`/`www` plus `storage_domain` (Garages
+   S3-API, siehe [Garage auf Non-Production-Stages](#garage-auf-non-production-stages)
    unten). Zusätzlich `acme_email` setzen, die Kontaktadresse, mit der das
    Zertifikatskonto der Stage registriert wird.
-2. `secrets/<stage>/` existiert bereits als Skeleton mit unabhängig frisch
-   generierten Pflichtwerten (`SECRET_KEY`, Postgres-Passwort,
-   Caddy-Basic-Auth-Hash, den eigenen MinIO-Root-Credentials dieser
-   Stage) — die Storage dieser Stage ist ihre eigene, bereits fertig
-   verdrahtete MinIO-Instanz, kein echtes AWS S3. SMTP- und
-   `GOOGLE_CLIENT_ID`-Werte sind bewusst leer, da für diese Stage noch
-   kein echter Mailserver/OAuth-App existiert. Vor dem produktiven
-   Einsatz ergänzen (siehe [Secrets pflegen](#secrets-pflegen), dort auch
-   die vollständige
+2. `secrets/<stage>/` aus den danebenliegenden `*.example`-Dateien
+   anlegen und jede echte Datei mit dem Vault verschlüsseln (siehe
+   [Secrets pflegen](#secrets-pflegen), dort auch die vollständige
    [Tabelle der Pflichtvariablen](#pflicht-env-variablen-je-stage-typ)).
-   Dieselbe Datei nimmt außerdem bereits
-   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_BUCKET`/`AWS_REGION`
-   auf — ein rein lesender IAM-User, nur auf den **Prod**-Bucket
-   beschränkt, getrennt von den `S3_*`-Werten oben (die das eigene MinIO
-   dieser Stage ansprechen). Kein manueller Out-of-Band-Schritt nötig —
-   genauso vault-verschlüsselt wie alles andere hier.
+   Jeden Pflichtwert für diese Stage frisch erzeugen (`SECRET_KEY`,
+   Postgres- und Valkey-Passwort, Caddy-Basic-Auth-Hash, die eigenen
+   Garage-Credentials dieser Stage); die Storage dieser Stage ist ihre
+   eigene Garage-Instanz, kein echtes AWS S3. SMTP und `GOOGLE_CLIENT_ID`
+   bleiben leer, bis für diese Stage ein echter Mailserver und eine
+   OAuth-App existieren. Der Downsync-Job braucht zusätzlich
+   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET` und
+   `AWS_REGION` eines rein lesenden IAM-Users (`s3:ListBucket` und
+   `s3:GetObject` auf dem Produktions-Bucket), der nur für diese Stage
+   angelegt und per `aws:SourceIp`-Bedingung auf die Serveradresse der
+   Stage beschränkt ist; den Schlüssel einer anderen Stage nie
+   übernehmen. Der Produktions-Bucket enthält auch die Datenbank-Backups,
+   dieser Schlüssel kann also einen vollständigen Dump aller
+   Mitgliederdaten lesen.
 3. DNS für alle vier Domains dieser Stage setzen (siehe
    [Voraussetzungen](#voraussetzungen) oben).
 4. `playbooks/setup_vps.yml`, dann `playbooks/deploy.yml`, jeweils mit
    `-i inventory/<stage>.ini` (siehe [Phase 1](#phase-1--vps-grundkonfiguration-nur-bei-neuaufsetzung-nötig)/[Phase 2](#phase-2--tag-2-betrieb)).
-   Das bringt auch das eigene MinIO dieser Stage hoch und behebt die
+   Das bringt auch das eigene Garage dieser Stage hoch und behebt die
    Postgres-Datenverzeichnis-Ownership automatisch — keine manuellen
    Schritte nötig.
 5. Um echte Daten statt einer leeren Datenbank zu sehen: einen Downsync
@@ -1001,7 +1044,7 @@ einer leeren Datenbank (keine Mitglieder, keine Daten).
    `vb-intern` (System → Scheduler), oder `podman exec vb-api python
    scripts/downsync_prod.py --yes` per SSH (siehe
    [Operative Skripte](#operative-skripte-in-vb-api)). Spiegelt den
-   kompletten Produktions-S3-Bucket in das MinIO dieser Stage und
+   kompletten Produktions-S3-Bucket in das Garage dieser Stage und
    restored die lokale Datenbank daraus — siehe den
    Plattenplatz-Hinweis in [Voraussetzungen](#voraussetzungen).
 
@@ -1058,9 +1101,9 @@ Stage-Typ gelten — unabhängig vom Provisionierungsstatus dieser Stage. Sie
 dokumentieren die Zielstruktur, nicht den aktuellen Rollout-Stand. Fünf
 Dateien gelten für jede Stage (`caddy.env.example`, `vb-api.env.j2.example`,
 `vb-api-pg.env.example`, `vb-intern.env.j2.example`,
-`vb-www.env.j2.example`); `vb-minio.env.j2.example` existiert nur unter
+`vb-www.env.j2.example`); `vb-garage.env.j2.example` existiert nur unter
 `test/`/`qa/` (Production nutzt echtes AWS S3, siehe
-[MinIO auf Non-Production-Stages](#minio-auf-non-production-stages)
+[Garage auf Non-Production-Stages](#garage-auf-non-production-stages)
 unten). Die echten, vault-verschlüsselten Dateien existieren nur für
 Stages, die tatsächlich einen Host dahinter haben; eine Stage im Status
 "Skeleton, noch kein eigener VPS" (siehe [Stages](#stages-1)) hat nur die
@@ -1070,7 +1113,7 @@ Vorlagen, keine echten Dateien, bis sie tatsächlich aufgesetzt wird.
 
 Welche Variablen wirklich einen echten Wert brauchen, unterscheidet sich
 zwischen Production (echtes AWS S3/SMTP/Google) und `test`/`qa` (eigenes
-MinIO, standardmäßig kein Mailserver/keine OAuth-App). "Optional" heißt:
+Garage, standardmäßig kein Mailserver/keine OAuth-App). "Optional" heißt:
 Der Wert hat in `app/core/config.py` einen funktionierenden Default, falls
 er leer bleibt.
 
@@ -1079,32 +1122,32 @@ er leer bleibt.
 | `caddy.env` | `LOGGING_USER`, `LOGGING_PASSWORD_HASH` | Pflicht | Pflicht |
 | `vb-api-pg.env` | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Pflicht | Pflicht |
 | `vb-api.env.j2` | `SECRET_KEY` | Pflicht | Pflicht |
-| `vb-api.env.j2` | `DATABASE_URL` | Pflicht | Pflicht |
+| `vb-api.env.j2` | `DATABASE_URL` | Pflicht (die von der Bootstrap-Superuser-Rolle abgespaltene Rolle `vb_app`, siehe `config/postgres/split-app-role.sql`) | Pflicht |
 | `vb-api.env.j2` | `VALKEY_URL` | Pflicht (ARQ-Worker/Background-Tasks) | Pflicht |
 | `vb-api-valkey.env` | `VALKEY_PASSWORD` | Pflicht (muss zu `vb-api.env.j2`s `VALKEY_URL` passen) | Pflicht |
-| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | Pflicht (echte AWS-Credentials) | Pflicht (MinIO-Root-Credentials dieser Stage) |
+| `vb-api.env.j2` | `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET` | Pflicht (echte AWS-Credentials) | Pflicht (der Garage-Access-Key dieser Stage, passend zu `vb-garage.env.j2`s `GARAGE_DEFAULT_ACCESS_KEY`/`GARAGE_DEFAULT_SECRET_KEY`) |
 | `vb-api.env.j2` | `S3_ENDPOINT_URL`, `S3_PUBLIC_ENDPOINT_URL` | nicht gesetzt (Default: echtes AWS) | Pflicht (`http://127.0.0.1:9000` / `https://{{ storage_domain }}`) |
-| `vb-api.env.j2` | `S3_REGION` | Pflicht (`eu-central-1`) | optional (MinIO ignoriert es; Default `us-east-1`) |
+| `vb-api.env.j2` | `S3_REGION` | Pflicht (`eu-central-1`) | Pflicht (`us-east-1`, muss zu `config/garage/garage.toml`s `s3_region` passen — Garage prüft das) |
 | `vb-api.env.j2` | `S3_PATH_*` | optional (sinnvolle Defaults) | optional (sinnvolle Defaults) |
 | `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | nicht zutreffend (Downsync verweigert sich auf Production) | Pflicht für Downsync-Job/-Button (rein lesende Prod-Bucket-Credentials) |
 | `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | Pflicht (`true` + echter Zeitplan) | optional (`false` — eigene Backups einer Wegwerf-Stage haben wenig Wert) |
 | `vb-api.env.j2` | `SMTP_*` | Pflicht (echter Mailversand) | nicht gesetzt (kein Mailserver für diese Stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht (Google-Login) | nicht gesetzt (keine OAuth-App für diese Stage) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht | nicht gesetzt |
-| `vb-minio.env.j2` | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Datei existiert auf Production nicht | Pflicht |
+| `vb-garage.env.j2` | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, `GARAGE_DEFAULT_BUCKET` | Datei existiert auf Production nicht | Pflicht |
 
-### MinIO auf Non-Production-Stages
+### Garage auf Non-Production-Stages
 
-`test`/`qa` betreiben eine eigene [MinIO](https://min.io/)-Instanz als
-S3-kompatiblen Ersatz für echtes AWS S3 — Production nutzt weiterhin den
-echten `vindobona2-at`-AWS-Bucket direkt, dort läuft nie MinIO. MinIO
-tritt `vb-api`s eigenem Pod bei (`templates/vb-api.pod.j2` — dessen
-`Wants=`/`Before=` auf `vb-minio.service` und die beiden veröffentlichten
-MinIO-Ports erscheinen nur außerhalb Production), statt einen eigenen Pod
-zu bekommen — genau wie der bestehende Postgres-Container `vb-api-pg`
-teilt es sich `vb-api`s Netzwerk-Namespace, wodurch `vb-api` es über
-schlichtes `localhost` erreicht. Das ist keine reine Bequemlichkeit: der
-interne Traffic zwischen `vb-api` und MinIO **muss** innerhalb dieses
+`test`/`qa` betreiben eine eigene [Garage](https://garagehq.deuxfleurs.fr/)-Instanz
+als S3-kompatiblen Ersatz für echtes AWS S3 — Production nutzt weiterhin
+den echten `vindobona2-at`-AWS-Bucket direkt, dort läuft nie Garage. Garage tritt `vb-api`s eigenem Pod bei
+(`templates/vb-api.pod.j2` — dessen `Wants=`/`Before=` auf
+`vb-garage.service` und die beiden veröffentlichten Garage-Ports
+erscheinen nur außerhalb Production), statt einen eigenen Pod zu bekommen
+— genau wie der bestehende Postgres-Container `vb-api-pg` teilt es sich
+`vb-api`s Netzwerk-Namespace, wodurch `vb-api` es über schlichtes
+`localhost` erreicht. Das ist keine reine Bequemlichkeit: der interne
+Traffic zwischen `vb-api` und Garage **muss** innerhalb dieses
 gemeinsamen Pod-Netzwerks bleiben und darf niemals über Caddy/das
 öffentliche Internet umgeleitet werden. Ein eigener Pod wäre von einem
 anderen Pod aus nur über dessen öffentliche Domain erreichbar — rootless
@@ -1113,13 +1156,30 @@ weshalb `127.0.0.1` aus einem Pod heraus keinen `127.0.0.1`-gebundenen
 Port erreicht, den ein *anderer* Pod auf demselben Host veröffentlicht;
 serverseitigen Traffic stattdessen über die öffentliche Domain zu leiten
 scheitert genauso (selbstreferenzielle öffentliche IP, kein Hairpin-NAT
-hier vorhanden). `templates/vb-minio.container.j2` (der
-Datenverzeichnis-Pfad hängt von der Stage ab, genau wie bei Postgres'
-eigenem Volume) trägt entsprechend `Pod=vb-api.pod`. `vb-api`s eigener
-`StorageClient` legt den `vindobona2-at`-Bucket in MinIO beim ersten
-Zugriff selbst an, falls er noch nicht existiert
-(`ensure_bucket_exists()`, nur außerhalb Production) — kein manuelles
-Bucket-Setup nötig.
+hier vorhanden). `templates/vb-garage.container.j2` (die
+Datenverzeichnis-Pfade hängen von der Stage ab, genau wie bei Postgres'
+eigenem Volume) trägt entsprechend `Pod=vb-api.pod`.
+
+Garages eigene Startflags `--single-node --default-bucket` legen den in
+`GARAGE_DEFAULT_BUCKET` genannten Bucket und einen S3-Access-Key dafür
+beim ersten Start selbst an — kein manuelles Bucket-Setup nötig.
+`deploy.yml` setzt das eine, das dieses Flag nicht kann: die
+CORS-Policy des Buckets, damit ein Browser die Antwort einer Presigned
+URL cross-origin lesen kann. Das läuft über `vb-api`s eigenes `boto3`
+(`podman exec vb-api python3 -c ...`, der echte S3-Aufruf
+`PutBucketCors` — Garages *Admin*-API nimmt eine CORS-Aktualisierung
+zwar auch entgegen und antwortet mit Erfolg, übernimmt sie aber
+nachweislich nicht dauerhaft), bei jedem Deploy erneut angewendet, da es
+ein "Setzen", kein "Hinzufügen" ist — billig, und selbstheilend, falls
+der Bucket je von Hand neu angelegt wurde.
+
+Der S3-Schlüssel der Anwendung ist kein Administrator: Er darf nur diesen
+einen Bucket lesen und schreiben, und `deploy.yml` entzieht ihm zusätzlich
+das Recht, weitere Buckets anzulegen (`garage key deny --create-bucket`,
+gefahrlos wiederholbar). Admin-API und Cluster verwenden eigene Secrets
+(`GARAGE_ADMIN_TOKEN`, `GARAGE_RPC_SECRET`), die die Anwendung nie sieht;
+der Access Key einer Presigned URL, den jeder Browser lesen kann, öffnet
+deshalb nichts außer diesem Bucket.
 
 **Zwei Ports, zwei sehr unterschiedliche Expositionsstufen:**
 - **9000 (S3-API) — öffentlich, hinter Caddy+TLS auf `storage_domain`.**
@@ -1128,16 +1188,18 @@ Bucket-Setup nötig.
   Galerie-Bilder) — die können `127.0.0.1` nicht auflösen, der API-Port
   muss also echt aus dem Internet erreichbar sein, genau wie
   `api`/`intern`/`www`. `vb-api` selbst nutzt diese öffentliche Route
-  nie: es spricht MinIO über das gemeinsame Pod-Netzwerk an
+  nie: es spricht Garage über das gemeinsame Pod-Netzwerk an
   (`S3_ENDPOINT_URL=http://127.0.0.1:9000`, siehe oben);
   `S3_PUBLIC_ENDPOINT_URL` ist das, was Presigned URLs tatsächlich nutzen.
-- **9001 (Web-Konsole) — nur lokal, kein Caddy-Routing.** Selten
-  gebraucht (wenn überhaupt, einmal direkt nach dem Aufsetzen) — per
-  SSH-Tunnel erreichen statt dafür einen dauerhaften öffentlichen
-  Endpoint samt eigenem Basic-Auth-Secret vorzuhalten:
+- **9001 (Admin-API) — nur lokal, kein Caddy-Routing.** Nur für
+  Bucket-/CORS-Verwaltung und den Healthcheck (siehe oben und
+  `templates/vb-garage.container.j2`s `HealthCmd`) — per SSH-Tunnel
+  erreichen, falls von Hand nötig, statt dafür einen dauerhaften
+  öffentlichen Endpoint vorzuhalten:
   ```bash
   ssh -L 9001:localhost:9001 service@<stage-host>
-  # danach http://localhost:9001 im eigenen Browser öffnen
+  # danach GET http://localhost:9001/v2/... mit einem
+  # Authorization: Bearer-Header mit dem GARAGE_ADMIN_TOKEN dieser Stage
   ```
 
 **Plattenplatz:** siehe [Voraussetzungen](#voraussetzungen) oben — ein
@@ -1158,14 +1220,14 @@ abstürzt oder neu startet, z. B. bei einem Deploy). `vb-api-worker`
 nutzt exakt dasselbe `vb-api`-Image wieder — kein eigenes
 Dockerfile/CI-Job nötig — sein Quadlet überschreibt per
 `Exec=arq app.worker.WorkerSettings` einfach das Default-Kommando des
-Images, genau der Mechanismus, den `vb-minio.container.j2` für MinIOs
-`Exec=server /data ...` bereits nutzt.
+Images, genau der Mechanismus, den `vb-garage.container.j2` für Garages
+`Exec=/garage server ...` bereits nutzt.
 
 Seine [Valkey](https://valkey.io/)-Abhängigkeit (`vb-api-valkey` — ein
 vollständig quelloffener, protokollkompatibler Redis-Fork; arqs
 Client-Bibliothek selbst spricht weiterhin das Redis-Wire-Protokoll,
 daher `redis://`-Connection-URLs und `arq.connections.RedisSettings` im
-Code) tritt aus demselben Grund wie MinIO `vb-api.pod` bei (siehe oben):
+Code) tritt aus demselben Grund wie Garage `vb-api.pod` bei (siehe oben):
 interner Traffic muss innerhalb des gemeinsamen Pod-Netzwerks bleiben und
 darf nie über das öffentliche Internet umgeleitet werden — dasselbe
 Muster, das `vb-api-pg` bereits für einen rein internen, im selben Pod
@@ -1385,7 +1447,7 @@ eigene Podman-Quadlets. Die generalisierten Vorlagen liegen unter `dev/`:
 dev/quadlets/api/      vb-api + vb-api-pg + Pod
 dev/quadlets/intern/   vb-intern
 dev/quadlets/www/      vb-www
-dev/quadlets/minio/    vb-minio (S3-Ersatz fuer AWS S3 in Dev)
+dev/quadlets/garage/   vb-garage (S3-Ersatz fuer AWS S3 in Dev)
 dev/env/               *.env.example fuer alle fuenf Container
 ```
 
@@ -1394,18 +1456,21 @@ dev/env/               *.env.example fuer alle fuenf Container
 1. Alle `*.example`-Dateien aus `dev/quadlets/` 1:1 nach
    `~/.config/containers/systemd/vb/<component>/` kopieren (Endung
    `.example` dabei weglassen), alle `*.example`-Dateien aus `dev/env/` nach
-   `~/.env/`.
+   `~/.env/`. Zusätzlich `config/garage/garage.toml` aus der Repo-Wurzel
+   dorthin kopieren, wohin `vb-garage.container`s Config-Volume zeigt
+   (siehe die Kommentare in dieser Datei selbst — sie braucht keine
+   lokalen Anpassungen, jede Stage nutzt dieselbe).
 2. In den kopierten Quadlets die Platzhalter ersetzen:
    `<path-to-vb-fastapi-vue>` (Pfad zu diesem 4-Repo-Checkout),
-   `<your-mail-dev-domain>`/`<your-minio-dev-domain>` (siehe
-   Caddy-Routing unten), `<path-to-local-minio-data-dir>`.
+   `<your-mail-dev-domain>`/`<your-garage-dev-domain>` (siehe
+   Caddy-Routing unten), `<path-to-local-garage-meta-dir>`/`<path-to-local-garage-data-dir>`.
 3. In den kopierten Env-Dateien alle `change-me`-Platzhalter durch echte
    lokale Werte ersetzen.
 
 ### Caddy-Routing lokal
 
 Kein separater Caddy-Dev-Container nötig — die drei Frontend-/Backend-Ports
-(`20000`–`20002`) sowie MinIO (`9000`/`9001`) binden direkt an `127.0.0.1`.
+(`20000`–`20002`) sowie Garage (`9000`/`9003`) binden direkt an `127.0.0.1`.
 Für einen echten Domainnamen statt `localhost:<port>` (z. B. um
 Cookies/CORS wie in Production zu testen) eigene lokale DNS-Auflösung +
 einen eigenen lokalen Reverse-Proxy einrichten:
@@ -1418,12 +1483,12 @@ lokaler Reverse-Proxy (eigene Wahl, z.B. Caddy)
    ├─ api.<your-dev-domain>    → 127.0.0.1:20000 → vb-api-pod
    ├─ intern.<your-dev-domain> → 127.0.0.1:20001 → vb-intern
    ├─ www.<your-dev-domain>    → 127.0.0.1:20002 → vb-www
-   └─ minio.<your-dev-domain>  → 127.0.0.1:9000  → vb-minio-pod
+   └─ garage.<your-dev-domain> → 127.0.0.1:9000  → vb-garage-pod
 ```
 
 Nicht Teil dieses Repos — die `AddHost=`-Zeilen in
-`vb-api.pod.example`/`vb-minio.pod.example` erwarten lediglich, dass
-`<your-mail-dev-domain>`/`<your-minio-dev-domain>` irgendwie auflösbar sind
+`vb-api.pod.example`/`vb-garage.pod.example` erwarten lediglich, dass
+`<your-mail-dev-domain>`/`<your-garage-dev-domain>` irgendwie auflösbar sind
 (ein einfacher lokaler DNS-/Hosts-Eintrag reicht; ein Reverse-Proxy ist nur
 für domainbasiertes Browser-Testen nötig).
 
@@ -1435,7 +1500,7 @@ für domainbasiertes Browser-Testen nötig).
 podman build --target dev -t vb-api:dev <path-to-vb-fastapi-vue>/vb-api
 
 systemctl --user daemon-reload
-systemctl --user start vb-minio-pod vb-api-pod vb-intern vb-www
+systemctl --user start vb-garage-pod vb-api-pod vb-intern vb-www
 
 # Datenbankschema anlegen:
 podman exec vb-api alembic upgrade head
@@ -1443,7 +1508,7 @@ podman exec vb-api alembic upgrade head
 
 **Seed-Daten:** kein separates Seed-Script nötig — `podman exec vb-api python
 scripts/downsync_prod.py --yes` zieht echte Produktionsdaten (unverändert,
-keine Anonymisierung) von AWS S3 in die lokale MinIO-Instanz und restored
+keine Anonymisierung) von AWS S3 in die lokale Garage-Instanz und restored
 die lokale DB daraus (`--yes` ist hier nötig, da ein reines `podman exec`
 ohne `-it` kein TTY für die interaktive Bestätigungsabfrage hat). Braucht
 `~/.env/vb-api-aws-prod.env` (siehe

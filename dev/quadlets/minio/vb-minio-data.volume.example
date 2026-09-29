@@ -1,4 +1,0 @@
-[Volume]
-Device=<path-to-local-minio-data-dir>
-Type=none
-Options=bind

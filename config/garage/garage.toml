@@ -1,0 +1,36 @@
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+# lmdb, not the also-supported embedded SQL backend: a throwaway single-node
+# rehearsal hung indefinitely opening that database file on repeated runs,
+# while lmdb started cleanly every time under the same conditions.
+db_engine = "lmdb"
+# Single node, no replication: one non-production stage, one container, no
+# cluster.
+replication_factor = 1
+
+# No rpc_secret here: the container passes it as GARAGE_RPC_SECRET (an
+# environment variable Garage's CLI reads on top of this file, see
+# vb-garage.env), the same way GARAGE_DEFAULT_ACCESS_KEY carries the S3 key
+# below - this file has no secret in it and can stay a plain, unencrypted,
+# identical file across every stage.
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# Matches app/core/config.py's S3_REGION default in vb-api - Garage checks
+# the region in a client's signature and refuses a mismatched signature
+# scope. Not "garage"
+# (Garage's own quickstart example): changing it would mean changing
+# S3_REGION on every non-production stage's vb-api secret instead of this
+# one already-unencrypted file.
+s3_region = "us-east-1"
+# Port 9000: the Caddyfile's storage_domain block is a plain reverse proxy
+# to 127.0.0.1:9000. Garage's path-style addressing (always enabled, unlike
+# virtual-hosted-style, which would need a wildcard DNS entry this
+# single-domain proxy does not have) is what makes that proxy work.
+api_bind_addr = "[::]:9000"
+
+[admin]
+# No admin_token here either, see the rpc_secret comment above
+# (GARAGE_ADMIN_TOKEN).
+api_bind_addr = "[::]:3903"

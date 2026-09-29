@@ -1,0 +1,58 @@
+[Unit]
+Description=VB Garage ({{ app_environment }})
+
+[Container]
+ContainerName=vb-garage
+Pod=vb-api.pod
+# Garage is actively maintained: pinned to a specific, verified version and
+# bumped on purpose rather than auto-updated, matching every other first-party/third-party
+# image pin in this project (see AutoUpdate on Postgres/Valkey above, which
+# both DO auto-update because their upstreams keep serving fixes for old
+# tags - Garage's registry does too, so this is a deliberate choice for
+# predictability, not a workaround for a dead upstream).
+Image=docker.io/dxflrs/garage:v2.4.1
+Exec=/garage server --single-node --default-bucket
+EnvironmentFile=%h/.env/vb-garage.env
+Volume=%h/data/vb/{{ app_environment }}/garage-config/garage.toml:/etc/garage.toml:ro,Z
+Volume=%h/data/vb/{{ app_environment }}/garage-meta:/var/lib/garage/meta:Z
+Volume=%h/data/vb/{{ app_environment }}/garage-data:/var/lib/garage/data:Z
+
+# --- SECURITY HARDENING ---
+# Garage's image has no chown/privilege-drop mechanism either (distroless:
+# no shell, no package manager, just the binary), so it runs directly as
+# its mapped UID. The playbook pre-chowns both data directories to UID 999
+# before this container ever starts.
+User=999
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations.
+PidsLimit=256
+PodmanArgs=--memory=1g
+
+# The bundled admin CLI (invoked via "garage" subcommands, e.g. the CORS
+# bootstrap in deploy.yml) writes no scratch state outside the two data
+# volumes above, but the Rust standard library still expects a writable
+# TMPDIR to exist.
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=32m
+
+# The image is distroless (no shell, no curl/wget), so the health check
+# uses the bundled binary's own subcommand instead of an HTTP probe. The
+# "CMD" prefix makes Podman run the binary directly: a plain string would be
+# run as "sh -c ...", which does not exist here, so the check would always
+# fail. (Podman 5.4 splits the JSON array form incorrectly, so the prefix
+# form is used.) Startup counts as complete only once the health check
+# passes.
+Notify=healthy
+HealthCmd=CMD /garage health -q
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=15s
+
+[Service]
+Restart=always
+RestartSec=5

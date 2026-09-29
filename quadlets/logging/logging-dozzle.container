@@ -13,7 +13,14 @@ Image=docker.io/amir20/dozzle:v10.6.11
 # Read-only only protects the socket file itself. Every API call is still
 # possible through it, including creating privileged containers. The viewer is
 # therefore reachable only through the authenticated route of the Caddyfile.
-Volume=%t/podman/podman.sock:/var/run/docker.sock:ro,z
+Volume=%t/podman/podman.sock:/var/run/docker.sock:ro
+# On hosts that enforce SELinux a confined container may not connect to the
+# Podman socket, so the label confinement is switched off for this one
+# container. It already holds the whole Podman API through that socket, so the
+# label adds no isolation here. Other hosts have no label enforcement and are
+# unaffected. No relabelling (:z) of the socket: that would change the label of
+# the host's own socket.
+SecurityLabelDisable=true
 
 PublishPort=127.0.0.1:8081:8080
 Environment=DOZZLE_BASE=/logging/dozzle

@@ -1,5 +1,11 @@
 {
 	email {{ acme_email }}
+{% if caddy_acme_ca is defined %}
+	# Let's Encrypt's staging CA: unlimited issuance, but the certificate chain
+	# is not publicly trusted. Only ever set on a non-production stage while
+	# iterating, to stay under the production CA's per-name rate limit.
+	acme_ca {{ caddy_acme_ca }}
+{% endif %}
 	# The admin API is unauthenticated and, with host networking, reachable by every
 	# process on the host. Nothing needs it at runtime: configuration changes are
 	# applied by restarting the unit and the health check uses the loopback

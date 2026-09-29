@@ -4,7 +4,7 @@ Description=VB www Public Site ({{ app_environment }})
 [Container]
 ContainerName=vb-www
 Pod=vb-www.pod
-Image=ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-www:{{ vb_www_image_tag | default('latest') }}
 AutoUpdate=registry
 EnvironmentFile=%h/.env/vb-www.env
 
@@ -12,20 +12,26 @@ EnvironmentFile=%h/.env/vb-www.env
 ReadOnly=true
 NoNewPrivileges=true
 DropCapability=all
-# CAP_NET_BIND_SERVICE for the master process binding port 80; nginx then
-# drops its worker processes to the unprivileged "nginx" user itself
-# (the "user nginx;" directive), which needs CAP_CHOWN (to hand the temp
-# dirs below to that user) and CAP_SETUID/CAP_SETGID (the actual drop) -
-# live-verified, workers fail to start without these three.
-AddCapability=CAP_NET_BIND_SERVICE CAP_CHOWN CAP_SETUID CAP_SETGID
+# No capability is added back: the image runs nginx-unprivileged, whose
+# master and worker processes are uid 101 throughout and which listens on
+# port 8080, so there is no privileged port to bind and no user to switch to.
 
-# /run holds nginx's PID file and the runtime-rendered config.js (see
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations.
+PidsLimit=128
+PodmanArgs=--memory=256m
+
+# /run holds the runtime-rendered config.js (see
 # docker/docker-entrypoint.d/40-generate-runtime-config.sh in the app
-# repo); /var/cache/nginx holds its request-buffering temp dirs.
+# repo); /tmp holds nginx's PID file and request-buffering temp dirs.
 Mount=type=tmpfs,target=/run,tmpfs-mode=1777,tmpfs-size=16m
-Mount=type=tmpfs,target=/var/cache/nginx,tmpfs-mode=0755,tmpfs-size=16m
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=16m
 
-HealthCmd=wget -qO- http://127.0.0.1/ || exit 1
+# Startup counts as complete only once the health check passes, so that
+# podman auto-update can detect a broken image and roll back.
+Notify=healthy
+HealthCmd=wget -qO- http://127.0.0.1:8080/ || exit 1
 HealthInterval=30s
 HealthTimeout=5s
 HealthRetries=3

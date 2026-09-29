@@ -2,14 +2,14 @@
 Wants=vb-api-pg.service vb-api.service vb-api-valkey.service
 Before=vb-api-pg.service vb-api.service vb-api-valkey.service
 {% if app_environment != 'production' %}
-# MinIO joins this pod (not its own) so vb-api reaches it via the shared
+# Garage joins this pod (not its own) so vb-api reaches it via the shared
 # pod network namespace (localhost) - a separate pod is only reachable
 # from another pod via Caddy/the public domain (every pod gets its own
-# private loopback under pasta), and internal vb-api<->MinIO traffic must
+# private loopback under pasta), and internal vb-api<->Garage traffic must
 # stay inside the pod network, never round-trip through the public
 # internet.
-Wants=vb-minio.service
-Before=vb-minio.service
+Wants=vb-garage.service
+Before=vb-garage.service
 {% endif %}
 
 [Pod]
@@ -18,7 +18,10 @@ AddHost={{ www_domain }}:host-gateway
 PublishPort=127.0.0.1:21000:8000
 {% if app_environment != 'production' %}
 PublishPort=127.0.0.1:9000:9000
-PublishPort=127.0.0.1:9001:9001
+# Garage's admin API (bucket/CORS management, the health check) - not
+# reachable by end users, only by deploy.yml's CORS bootstrap task and
+# whoever holds this host's SSH access.
+PublishPort=127.0.0.1:9001:3903
 {% endif %}
 # IPv4-only: pasta's default dual-stack IPv6 passthrough is fragile in this
 # host's network setup and can silently black-hole outbound IPv6 connections

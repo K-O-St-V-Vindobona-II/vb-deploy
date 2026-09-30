@@ -167,6 +167,12 @@ set up on every family (unattended-upgrades, dnf-automatic, and a daily
   change (no TTY available over a plain SSH connection): log in once
   normally and interactively via `ssh root@<host>` and set the new
   password, only then continue with Ansible.
+- **Ansible verifies the SSH host key.** A host seen for the first time is
+  trusted and remembered in `~/.ssh/known_hosts` (`accept-new`); a changed
+  key aborts the run. On the first connection to a new server, compare its
+  fingerprint with the one shown in the provider console
+  (`ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -`). The legitimate case
+  of a changed key is described in the next item.
 - **After a reinstall, SSH reports "REMOTE HOST IDENTIFICATION HAS
   CHANGED"** (new host key) — this is expected, not a security incident.
   Remove the old entry: `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>`
@@ -341,6 +347,14 @@ or `.env.j2`. For `.env.j2` files (domain-/stage-dependent content, see
 then Jinja2 templating of the domain/stage variables —
 `ansible.builtin.template` automatically decrypts a vault file as it reads
 it, so there's no ordering collision between vault and templating.
+
+**Commit guard:** `.pre-commit-config.yaml` contains a local hook that rejects
+any `secrets/{production,qa,test}/*.env` or `*.env.j2` file that is not
+Ansible Vault encrypted (the `.example` templates are exempt). It needs
+`pre-commit` installed locally and is enabled once per clone with
+`pre-commit install`. Change secrets only with `ansible-vault edit`, never by
+decrypting a tracked file in place. `.gitignore` additionally excludes
+`.vault_pass*`, `*.pem`, `*.key` and `*.decrypted`.
 
 **`.example` templates vs. real files:** every stage directory under
 `secrets/` carries `.example` templates for whichever files apply to that
@@ -912,6 +926,13 @@ Automatische Sicherheitsupdates sind auf jeder Familie eingerichtet
   Passwortwechsel (kein TTY über eine einfache SSH-Verbindung verfügbar):
   einmal ganz normal interaktiv per `ssh root@<host>` einloggen und das neue
   Passwort setzen, danach erst mit Ansible weitermachen.
+- **Ansible prüft den SSH-Host-Key.** Ein Host, der zum ersten Mal
+  angesprochen wird, gilt als vertrauenswürdig und wird in
+  `~/.ssh/known_hosts` gemerkt (`accept-new`); ein geänderter Key bricht den
+  Lauf ab. Beim ersten Verbinden mit einem neuen Server den Fingerprint mit
+  dem in der Provider-Konsole angezeigten vergleichen
+  (`ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -`). Der legitime Fall
+  eines geänderten Keys steht im nächsten Punkt.
 - **Nach einem Reinstall meldet SSH "REMOTE HOST IDENTIFICATION HAS
   CHANGED"** (neuer Host-Key) — das ist erwartet, kein Sicherheitsvorfall.
   Alten Eintrag entfernen: `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>`
@@ -1094,6 +1115,15 @@ Vault-Entschlüsselung, danach das Jinja2-Templating der
 Domain-/Stage-Variablen — `ansible.builtin.template` entschlüsselt eine
 Vault-Datei beim Lesen automatisch mit, es gibt also keine
 Reihenfolge-Kollision zwischen Vault und Templating.
+
+**Commit-Schutz:** `.pre-commit-config.yaml` enthält einen lokalen Hook, der
+jede Datei `secrets/{production,qa,test}/*.env` bzw. `*.env.j2` ablehnt, die
+nicht mit Ansible Vault verschlüsselt ist (die `.example`-Vorlagen sind
+ausgenommen). Er setzt lokal installiertes `pre-commit` voraus und wird pro
+Klon einmalig mit `pre-commit install` aktiviert. Secrets nur mit
+`ansible-vault edit` ändern, nie durch Entschlüsseln einer getrackten Datei
+an Ort und Stelle. `.gitignore` schließt zusätzlich `.vault_pass*`, `*.pem`,
+`*.key` und `*.decrypted` aus.
 
 **`.example`-Vorlagen vs. echte Dateien:** Jedes Stage-Verzeichnis unter
 `secrets/` führt `.example`-Vorlagen für die Dateien, die für diesen

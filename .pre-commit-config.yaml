@@ -1,0 +1,11 @@
+repos:
+  - repo: local
+    hooks:
+      - id: vault-encrypted-secrets
+        name: Tracked secrets must be Ansible Vault encrypted
+        language: system
+        pass_filenames: true
+        files: ^secrets/(production|qa|test)/.+\.(env|env\.j2)$
+        entry: >-
+          bash -c 'for f in "$@"; do head -c 14 "$f" | grep -q "^.ANSIBLE_VAULT"
+          || { echo "Not vault-encrypted: $f" >&2; exit 1; }; done' --

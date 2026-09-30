@@ -1,5 +1,5 @@
 [Pod]
 PodName=vb-garage-pod
 PublishPort=127.0.0.1:9000:9000
-PublishPort=127.0.0.1:9003:9003
+PublishPort=127.0.0.1:9001:3903
 AddHost=<your-garage-dev-domain>:host-gateway

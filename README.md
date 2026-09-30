@@ -696,7 +696,7 @@ dev/env/               *.env.example for all five containers
 ### Local Caddy Routing
 
 No separate Caddy dev container needed — the three frontend/backend ports
-(`20000`–`20002`) as well as Garage (`9000`/`9003`) bind directly to
+(`20000`–`20002`) as well as Garage (`9000`/`9001`) bind directly to
 `127.0.0.1`. For a real domain name instead of `localhost:<port>` (e.g. to
 test cookies/CORS like in production), set up your own local DNS
 resolution + your own local reverse proxy:
@@ -1470,7 +1470,7 @@ dev/env/               *.env.example fuer alle fuenf Container
 ### Caddy-Routing lokal
 
 Kein separater Caddy-Dev-Container nötig — die drei Frontend-/Backend-Ports
-(`20000`–`20002`) sowie Garage (`9000`/`9003`) binden direkt an `127.0.0.1`.
+(`20000`–`20002`) sowie Garage (`9000`/`9001`) binden direkt an `127.0.0.1`.
 Für einen echten Domainnamen statt `localhost:<port>` (z. B. um
 Cookies/CORS wie in Production zu testen) eigene lokale DNS-Auflösung +
 einen eigenen lokalen Reverse-Proxy einrichten:

@@ -19,6 +19,11 @@ SELECT format('ALTER ROLE vb_app PASSWORD %L', :'app_password')
 SELECT format('ALTER DATABASE %I OWNER TO vb_app', current_database())
 \gexec
 
+-- The schema itself. A database that was recreated by a restore leaves public
+-- owned by the restoring role and closed to everyone else, which locks the
+-- application role out of it; a database created by initdb is not affected.
+ALTER SCHEMA public OWNER TO vb_app;
+
 DO $$
 DECLARE
     obj record;

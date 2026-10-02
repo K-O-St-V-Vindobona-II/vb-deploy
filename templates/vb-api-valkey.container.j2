@@ -21,9 +21,21 @@ ReadOnly=true
 NoNewPrivileges=true
 DropCapability=all
 
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations.
+PidsLimit=128
+PodmanArgs=--memory=256m
+
 Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=16m
 
-HealthCmd=valkey-cli -a "$VALKEY_PASSWORD" ping || exit 1
+# The password reaches valkey-cli through the environment, not the command
+# line (a command-line argument is visible in the container's process list
+# for the duration of every check). Startup counts as complete only once
+# the health check passes, so that podman auto-update can detect a broken
+# image and roll back.
+Notify=healthy
+HealthCmd=REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli ping || exit 1
 HealthInterval=10s
 HealthTimeout=5s
 HealthStartPeriod=10s

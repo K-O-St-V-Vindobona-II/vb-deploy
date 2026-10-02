@@ -107,6 +107,91 @@
             state: present
 
     # ------------------------------------------------------------------
+    # 1b. Automatic security updates. The host is internet-facing and this
+    #     playbook is only re-run for verification, so kernel, OpenSSH, libc
+    #     and Podman fixes would otherwise wait for a manual run. Only
+    #     security updates are applied; a pending reboot (kernel) stays a
+    #     manual decision - Debian marks it in /var/run/reboot-required.
+    # ------------------------------------------------------------------
+    - name: Enable unattended security updates (Debian)
+      when: ansible_os_family == "Debian"
+      block:
+        - ansible.builtin.apt:
+            name: unattended-upgrades
+            state: present
+        - ansible.builtin.copy:
+            dest: /etc/apt/apt.conf.d/20auto-upgrades
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              APT::Periodic::Update-Package-Lists "1";
+              APT::Periodic::Unattended-Upgrade "1";
+
+    - name: Enable automatic security updates (RedHat)
+      when: ansible_os_family == "RedHat"
+      block:
+        - ansible.builtin.dnf:
+            name: dnf-automatic
+            state: present
+        - ansible.builtin.lineinfile:
+            path: /etc/dnf/automatic.conf
+            regexp: "^upgrade_type\\s*="
+            line: "upgrade_type = security"
+        - ansible.builtin.lineinfile:
+            path: /etc/dnf/automatic.conf
+            regexp: "^apply_updates\\s*="
+            line: "apply_updates = yes"
+        - ansible.builtin.systemd:
+            name: dnf-automatic.timer
+            state: started
+            enabled: yes
+
+    # SUSE ships no ready-made timer for this, so a small one is installed:
+    # zypper applies only the patches of the category "security". Exit code
+    # 102 (a reboot is needed) and 103 (zypper updated itself) are results,
+    # not failures.
+    - name: Enable automatic security updates (SUSE)
+      when: ansible_os_family == "Suse"
+      block:
+        - ansible.builtin.copy:
+            dest: /etc/systemd/system/vb-security-updates.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Install pending security patches
+              Wants=network-online.target
+              After=network-online.target
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/zypper --non-interactive patch --category security --auto-agree-with-licenses
+              SuccessExitStatus=102 103
+        - ansible.builtin.copy:
+            dest: /etc/systemd/system/vb-security-updates.timer
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Install pending security patches every day
+
+              [Timer]
+              OnCalendar=daily
+              RandomizedDelaySec=1h
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+        - ansible.builtin.systemd:
+            name: vb-security-updates.timer
+            state: started
+            enabled: yes
+            daemon_reload: yes
+
+    # ------------------------------------------------------------------
     # 2. Check the Podman version - fail fast instead of a third-party
     #    fallback. Current default images (verified as of 2026-08-27:
     #    Debian 13, Ubuntu >=25.10, Rocky/Alma/CentOS Stream 10, openSUSE
@@ -194,6 +279,15 @@
         name: admin
         password: "{{ admin_pw | password_hash('sha512') }}"
 
+    # Shown right here, not at the end of the play: a later task that fails
+    # (or the reboot) would otherwise leave a password that was set but never
+    # displayed, and the next run no longer creates the user, so it would be
+    # lost for good.
+    - name: Show generated admin password (only on first creation!)
+      when: admin_check.rc != 0
+      ansible.builtin.debug:
+        msg: "IMPORTANT - save this in the password safe right now: admin / {{ admin_pw }}"
+
     - name: Set password for "service" (only on first creation)
       when: service_check.rc != 0
       ansible.builtin.user:
@@ -250,14 +344,43 @@
     # ------------------------------------------------------------------
     - name: Enable linger for "service" (containers survive logout)
       ansible.builtin.command: loginctl enable-linger service
-      changed_when: true
+      args:
+        creates: /var/lib/systemd/linger/service
 
-    - name: Allow unprivileged ports from 25 (for rootless Podman)
+    # Caddy runs rootless and binds 80 and 443. Every unprivileged process may
+    # bind the ports from this value upwards, so it stays as high as possible.
+    - name: Allow unprivileged ports from 80 (for rootless Podman)
       ansible.builtin.copy:
         dest: /etc/sysctl.d/99-podman-ports.conf
-        content: "net.ipv4.ip_unprivileged_port_start=25\n"
+        content: "net.ipv4.ip_unprivileged_port_start=80\n"
         mode: "0644"
       notify: reload sysctl
+
+    # Rootless containers get their resource limits (memory, cpu, pids) from
+    # the cgroup controllers that systemd delegates to the user's own manager.
+    # Some distributions delegate only "pids" by default; the container runtime
+    # then refuses to start every container that carries a memory limit. The
+    # drop-in hands over the controllers the Quadlets use and is identical to
+    # the default where a distribution already delegates them. It takes effect
+    # for user managers started afterwards, so on a host that is already
+    # running it needs a reboot.
+    - name: Create the drop-in directory for the user manager
+      ansible.builtin.file:
+        path: /etc/systemd/system/user@.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Delegate cgroup controllers to the user manager (limits of rootless containers)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/user@.service.d/50-vb-delegate.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Service]
+          Delegate=pids memory cpu cpuset io
 
     - name: Create ~/.config/containers for "service"
       ansible.builtin.file:
@@ -298,9 +421,27 @@
     # freshly started sshd would lock root out immediately and the
     # module would hang until reboot_timeout on its own reconnect check.
     # ------------------------------------------------------------------
+    # The marker is written only after the host came back, so an interrupted
+    # first run still reboots on the next run, and a verification re-run
+    # neither reports a change nor restarts the host.
+    - name: Check whether the finalizing reboot already happened
+      ansible.builtin.stat:
+        path: /var/lib/vb-setup-rebooted
+      register: setup_reboot_marker
+
     - name: Reboot host (finalizes kernel/Podman/systemd changes)
-      ansible.builtin.reboot:
-        reboot_timeout: 600
+      when: not setup_reboot_marker.stat.exists
+      block:
+        - ansible.builtin.reboot:
+            reboot_timeout: 600
+        - ansible.builtin.file:
+            path: /var/lib/vb-setup-rebooted
+            state: touch
+            owner: root
+            group: root
+            mode: "0644"
+            modification_time: preserve
+            access_time: preserve
 
     # ------------------------------------------------------------------
     # 8. Firewall: only SSH + HTTP/HTTPS (Caddy) left open
@@ -308,12 +449,36 @@
     - name: Configure firewall (Debian/UFW)
       when: ansible_os_family == "Debian"
       block:
-        - ansible.builtin.command: ufw default allow outgoing
-        - ansible.builtin.command: ufw default deny incoming
-        - ansible.builtin.command: ufw allow 22/tcp
-        - ansible.builtin.command: ufw allow 80/tcp
-        - ansible.builtin.command: ufw allow 443/tcp
-        - ansible.builtin.command: ufw --force enable
+        - community.general.ufw:
+            default: allow
+            direction: outgoing
+        - community.general.ufw:
+            default: deny
+            direction: incoming
+        # SSH is open without a connection rate limit: password and root
+        # login are disabled, so guessing gets an attacker nowhere, while a
+        # limit (ufw "limit" denies an address after six connections in
+        # thirty seconds) locks the operator out of the host as soon as a
+        # script or a few quick logins open several connections. The allow
+        # rule comes first and exists before the firewall is enabled; the
+        # older limit rule is removed afterwards, if a host still has it, so
+        # SSH is never without a rule in between.
+        - community.general.ufw:
+            rule: allow
+            port: "22"
+            proto: tcp
+        - community.general.ufw:
+            rule: limit
+            port: "22"
+            proto: tcp
+            delete: true
+        - community.general.ufw:
+            rule: allow
+            port: "{{ item }}"
+            proto: tcp
+          loop: ["80", "443"]
+        - community.general.ufw:
+            state: enabled
 
     - name: Configure firewall (RedHat/SUSE/firewalld)
       when: ansible_os_family in ["RedHat", "Suse"]
@@ -323,44 +488,102 @@
             state: started
             enabled: yes
         - ansible.builtin.command: firewall-cmd --set-default-zone=public
+          register: firewall_default_zone
+          changed_when: "'ZONE_ALREADY_SET' not in firewall_default_zone.stdout + firewall_default_zone.stderr"
+        # "immediate" applies each change to the running firewall as well, so
+        # no separate reload command (which would report a change on every
+        # run) is needed.
         - ansible.builtin.firewalld:
             port: "{{ item }}"
             permanent: yes
+            immediate: yes
             state: enabled
           loop:
             - 22/tcp
             - 80/tcp
             - 443/tcp
-        - ansible.builtin.command: firewall-cmd --reload
+        # The default zone of the RedHat family also lets the web console
+        # (cockpit, port 9090) through. The console is not used here, so the
+        # service is closed even though nothing listens on it today.
+        # dhcpv6-client stays: some providers hand out the IPv6 address
+        # through DHCPv6.
+        - ansible.builtin.firewalld:
+            service: cockpit
+            permanent: yes
+            immediate: yes
+            state: disabled
 
     # ------------------------------------------------------------------
     # 9. SSH hardening (after the reboot - locks root out only at the end
     # of the play via the handler, no more root connection needed from
     # here)
     # ------------------------------------------------------------------
-    - name: Disable root SSH login
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: "^#?PermitRootLogin"
-        line: "PermitRootLogin no"
-      notify: restart sshd
-
-    - name: Disable password login for "admin" (key-only)
+    - name: Remove the earlier admin-only password rule (superseded by the drop-in below)
       ansible.builtin.blockinfile:
         path: /etc/ssh/sshd_config
         marker: "# {mark} ANSIBLE MANAGED BLOCK - admin key-only"
-        block: |
-          Match User admin
-              PasswordAuthentication no
+        state: absent
       notify: restart sshd
 
-    # ------------------------------------------------------------------
-    # 10. Wrap-up: password notice
-    # ------------------------------------------------------------------
-    - name: Show generated admin password (only on first creation!)
-      when: admin_check.rc != 0
-      ansible.builtin.debug:
-        msg: "IMPORTANT - save this in the password safe right now: admin / {{ admin_pw }}"
+    # A drop-in named 00-* is read before every other file in sshd_config.d
+    # and sshd uses the first value it finds for a keyword, so this file also
+    # wins over drop-ins shipped by cloud images. sshd itself validates it
+    # before it replaces the live file.
+    - name: Install SSH hardening drop-in (key-only for every user, no root)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-vb-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          X11Forwarding no
+          MaxAuthTries 3
+          LoginGraceTime 30
+          AllowUsers admin service
+        validate: /usr/sbin/sshd -t -f %s
+      notify: restart sshd
+
+    # Some images ship an /etc/ssh/sshd_config of their own without any
+    # Include line. Where that file exists, sshd reads it alone (on SUSE it
+    # then ignores the vendor default in /usr/etc, including that default's
+    # Include of sshd_config.d), so the drop-in above would never be read. The
+    # include is put at the top because sshd uses the first value it finds.
+    # Where the main file already includes the directory (Debian, RedHat
+    # family) the line matches and nothing changes.
+    - name: Check for a main sshd configuration in /etc
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config
+      register: sshd_main_config
+
+    - name: Make the main sshd configuration read the drop-in directory
+      when: sshd_main_config.stat.exists
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$'
+        line: Include /etc/ssh/sshd_config.d/*.conf
+        insertbefore: BOF
+        validate: /usr/sbin/sshd -t -f %s
+      notify: restart sshd
+
+    - name: Read the effective sshd configuration
+      ansible.builtin.command: /usr/sbin/sshd -T
+      register: sshd_effective
+      changed_when: false
+      check_mode: false
+
+    # Handlers run at the end of the play, so a failure here stops the play
+    # before sshd is restarted: a configuration that another file overrides is
+    # never activated silently.
+    - name: Ensure the hardening is effective
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in sshd_effective.stdout_lines"
+          - "'passwordauthentication no' in sshd_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in sshd_effective.stdout_lines"
 
   handlers:
     - name: reload sysctl

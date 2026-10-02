@@ -6,8 +6,14 @@ ContainerName=vb-api-pg
 Pod=vb-api.pod
 Image=docker.io/library/postgres:18
 AutoUpdate=registry
+# The pod shares one network namespace, so every other container reaches this
+# server from 127.0.0.1. The image's default pg_hba.conf trusts loopback
+# clients; this file requires a password from every TCP client instead (see
+# config/postgres/pg_hba.conf, installed by deploy.yml).
+Exec=postgres -c hba_file=/etc/postgresql/pg_hba.conf
 EnvironmentFile=%h/.env/vb-api-pg.env
 Volume=%h/data/vb/{{ app_environment }}/postgres:/var/lib/postgresql:Z
+Volume=%h/data/vb/{{ app_environment }}/postgres-config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro,Z
 
 # --- SECURITY HARDENING ---
 # The playbook pre-chowns the data directory to UID 999 (see
@@ -21,11 +27,21 @@ ReadOnly=true
 NoNewPrivileges=true
 DropCapability=all
 
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations.
+PidsLimit=512
+PodmanArgs=--memory=2g
+
 # The unix socket directory isn't part of the mounted data volume, and
 # postgres/pg_isready need /tmp for sorts and (once, on init) nss_wrapper.
 Mount=type=tmpfs,target=/var/run/postgresql,tmpfs-mode=1777,tmpfs-size=32m
 Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=32m
 
+# Startup counts as complete only once the health check passes: dependent
+# units then wait for a usable database, and podman auto-update can detect a
+# broken update and roll back.
+Notify=healthy
 HealthCmd=pg_isready -U vb -d vb || exit 1
 HealthInterval=10s
 HealthTimeout=10s

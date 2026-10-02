@@ -1,0 +1,4 @@
+[Volume]
+Device=<path-to-local-garage-meta-dir>
+Type=none
+Options=bind

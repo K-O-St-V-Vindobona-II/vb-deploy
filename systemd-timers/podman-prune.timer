@@ -4,7 +4,10 @@ Description=Weekly timer for Podman image cleanup
 [Timer]
 # Every Sunday at 04:00 in the morning (after the backups)
 OnCalendar=Sun *-*-* 04:00:00
-Persistent=true
+# Deliberately not persistent: a run missed while the host was down would fire
+# right after boot, when no container exists yet, and would delete every image
+# the starting services still need.
+Persistent=false
 
 [Install]
 WantedBy=timers.target

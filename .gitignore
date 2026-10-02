@@ -1,7 +1,13 @@
 # Local Ansible Vault password file - never committed, see README.md's
 # "Maintaining Secrets" section.
-.vault_pass
+.vault_pass*
 *.retry
 *.log
 __pycache__/
 *.pyc
+
+# Key material and decrypted leftovers. Vault-encrypted files under secrets/ are
+# tracked on purpose and verified by the pre-commit hook.
+*.pem
+*.key
+*.decrypted

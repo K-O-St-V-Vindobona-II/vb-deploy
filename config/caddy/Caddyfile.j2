@@ -32,41 +32,40 @@ http://127.0.0.1:2020 {
 	}
 }
 
+{# Where the application's images and media are loaded from. Production uses
+   the object storage's own host (storage_public_origin in the inventory); the
+   other stages serve their storage through this Caddy under storage_domain. #}
+{% if storage_public_origin is defined %}
+{% set storage_origin = storage_public_origin %}
+{% else %}
+{% set storage_origin = 'https://' ~ storage_domain %}
+{% endif %}
 # vb-intern hardening: browser headers plus a Content-Security-Policy scoped to
-# what the app loads (its own bundle, the Google sign-in script and frame, the
-# API origin). img-src and media-src are enforced but deliberately broad
-# ("https:") instead of pinned to one origin: archive and standesdb images are
-# fetched from presigned storage URLs, and the origin of the production object
-# storage lives in vault-encrypted values that are not visible in this file.
-# The Report-Only header carries the tight, intended target, so a browser
-# console shows every origin the broad allowance still permits, without
-# blocking anything. Once the production storage origin is confirmed, add it
-# to the enforcing header, drop the broad "https:" and remove the second header.
+# what the app loads: its own bundle, the Google sign-in script, stylesheet and
+# frame, the API origin, and images and media from the object storage only (the
+# standesdb and archive files are fetched from presigned storage URLs).
 (intern_hardening) {
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline'; connect-src 'self' https://{{ api_domain }} https://accounts.google.com; frame-src https://accounts.google.com; img-src 'self' data: https:; media-src 'self' https:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-		Content-Security-Policy-Report-Only "default-src 'self'; img-src 'self' data:{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}; media-src 'self'{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; connect-src 'self' https://{{ api_domain }} https://accounts.google.com; frame-src https://accounts.google.com; img-src 'self' data: {{ storage_origin }}; media-src 'self' {{ storage_origin }}; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 	}
 }
 
 # vb-www hardening: the same browser headers plus a Content-Security-Policy
 # scoped to what the public site loads: its own script, stylesheet and fonts,
-# the API for fetch(), the gallery images from presigned storage URLs and the
-# three frames embedded on the page (video, calendar, map). img-src is enforced
-# as "https:" for the reason given at (intern_hardening); the Report-Only header
-# carries the tight target.
+# the API for fetch(), the gallery images from presigned storage URLs (the
+# object storage host only) and the three frames embedded on the page (video,
+# calendar, map).
 (www_hardening) {
 	header {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
-		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' https:; font-src 'self'; connect-src https://{{ api_domain }}; frame-src https://www.youtube-nocookie.com https://calendar.google.com https://www.openstreetmap.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
-		Content-Security-Policy-Report-Only "default-src 'none'; img-src 'self'{% if app_environment != 'production' %} https://{{ storage_domain }}{% endif %}"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' {{ storage_origin }}; font-src 'self'; connect-src https://{{ api_domain }}; frame-src https://www.youtube-nocookie.com https://calendar.google.com https://www.openstreetmap.org; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
 	}
 }
 

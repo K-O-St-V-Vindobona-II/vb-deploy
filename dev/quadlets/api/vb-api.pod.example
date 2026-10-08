@@ -4,6 +4,9 @@ Before=vb-api-valkey.service
 
 [Pod]
 PodName=vb-api-pod
+# Keep this bound to 127.0.0.1: the API trusts the forwarded client address of
+# any peer (the start command in the vb-api Dockerfile), so only processes of
+# your machine may be able to connect.
 PublishPort=127.0.0.1:20000:8000
 PublishPort=127.0.0.1:5432:5432
 # host-gateway lets the container reach services running directly on your

@@ -104,6 +104,9 @@ http://127.0.0.1:2020 {
 		max_size {{ api_max_request_body | default('25MB') }}
 	}
 
+	# No trusted_proxies are configured, so Caddy replaces any X-Forwarded-For
+	# sent by the client with the client's own address. The API takes the rate
+	# limit key from that header and relies on this.
 	reverse_proxy 127.0.0.1:21000 {
 		header_down -Server
 	}

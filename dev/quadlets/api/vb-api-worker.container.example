@@ -12,6 +12,9 @@ Exec=arq app.worker.WorkerSettings
 Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
 UserNS=keep-id
 Environment=WATCHFILES_FORCE_POLLING=true
+# Keep the interactive shell history out of the bind-mounted source tree: the
+# container's HOME is /app, which is the working tree.
+Environment=HISTFILE=/dev/null
 # The web container's own entrypoint already applies pending migrations on
 # every start - a second container running the same entrypoint concurrently
 # would redundantly (and, with real pending migrations, riskily) race it.

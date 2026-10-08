@@ -15,6 +15,13 @@ Before=vb-garage.service
 [Pod]
 PodName=vb-api-pod
 AddHost={{ www_domain }}:host-gateway
+# Bound to the loopback interface of the host on purpose: the API trusts the
+# forwarded client address of any peer (the start commands in the vb-api
+# Dockerfile), because under rootless networking the container sees every
+# connection from the host as coming from the host's own address. Only
+# processes of this host may be able to connect, and the reverse proxy replaces
+# any client-supplied X-Forwarded-For. Never publish this port on another
+# interface.
 PublishPort=127.0.0.1:21000:8000
 {% if app_environment != 'production' %}
 PublishPort=127.0.0.1:9000:9000

@@ -11,6 +11,9 @@ AutoUpdate=local
 Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
 UserNS=keep-id
 Environment=WATCHFILES_FORCE_POLLING=true
+# Keep the interactive shell history out of the bind-mounted source tree: the
+# container's HOME is /app, which is the working tree.
+Environment=HISTFILE=/dev/null
 EnvironmentFile=%h/.env/vb-api.env
 # AWS credentials for the non-prod downsync script/job. No leading "-"
 # here - Quadlet's EnvironmentFile= does not support an "optional if

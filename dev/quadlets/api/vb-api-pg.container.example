@@ -7,8 +7,18 @@ Pod=vb-api.pod
 Image=docker.io/library/postgres:18
 AutoUpdate=registry
 
+# The pod shares one network namespace, so every other container reaches this
+# server from 127.0.0.1. The image's default pg_hba.conf trusts loopback
+# clients; this file requires a password from every TCP client instead. Copy
+# dev/postgres/pg_hba.conf to ~/data/vb-api/postgres-config/pg_hba.conf.
+Exec=postgres -c hba_file=/etc/postgresql/pg_hba.conf
 EnvironmentFile=%h/.env/vb-api-pg.env
 Volume=%h/data/vb-api/postgres:/var/lib/postgresql:Z
+Volume=%h/data/vb-api/postgres-config/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro,Z
+
+# The image's root entrypoint needs its default capabilities, so only the
+# privilege-escalation guard is added here.
+NoNewPrivileges=true
 
 HealthCmd=pg_isready -U vb -d vb || exit 1
 HealthInterval=10s

@@ -99,6 +99,21 @@
           through this repo - only locally via their own Podman Quadlets.
         success_msg: "Stage '{{ app_environment }}' is valid."
 
+    - name: Validate stage variables
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - item in vars
+          - "'CHANGEME' not in (lookup('vars', item) | string)"
+        fail_msg: >-
+          Inventory variable '{{ item }}' is missing or still contains the
+          CHANGEME placeholder.
+      loop: >-
+        {{
+          ['acme_email', 'api_domain', 'intern_domain', 'www_domain']
+          + (['storage_domain'] if app_environment != 'production' else [])
+        }}
+
     # ------------------------------------------------------------------
     # 1. Ensure directories exist
     # ------------------------------------------------------------------
@@ -224,6 +239,63 @@
         patterns: "*.env"
       register: secret_files
 
+    - name: "Find *.env.j2 in secrets/<stage>/"
+      delegate_to: localhost
+      become: no
+      ansible.builtin.find:
+        paths: "{{ local_secrets_path }}"
+        patterns: "*.env.j2"
+      register: secret_templates
+
+    # The vault files are decrypted in memory on the control node only. The
+    # values never reach the output: they are compared inside no_log facts and
+    # only the resulting booleans and file names are asserted afterwards.
+    # The PostgreSQL password is not compared: the API connects as its own
+    # role (vb_app) whose password is set from DATABASE_URL further below, so
+    # it is deliberately not the bootstrap password of vb-api-pg.env.
+    - name: Look for placeholder values in the secret files
+      when: (secret_files.files + secret_templates.files) | length > 0
+      no_log: true
+      ansible.builtin.set_fact:
+        placeholder_secret_files: >-
+          {{
+            (secret_files.files + secret_templates.files) | map(attribute='path') | list
+            | zip(query('ansible.builtin.file', *((secret_files.files + secret_templates.files) | map(attribute='path') | list)))
+            | selectattr('1', 'search', 'change-me')
+            | map(attribute='0') | map('basename') | list
+          }}
+
+    - name: Compare the Valkey password in its two files
+      no_log: true
+      ansible.builtin.set_fact:
+        valkey_password_matches: "{{ own | length == 1 and own == used }}"
+      vars:
+        own: "{{ lookup('file', local_secrets_path ~ '/vb-api-valkey.env') | regex_findall('^VALKEY_PASSWORD=(.+)$', multiline=True) }}"
+        used: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^VALKEY_URL=[^:]+://[^:]*:([^@]*)@', multiline=True) }}"
+
+    - name: Compare the password policy in the API and intern files
+      no_log: true
+      ansible.builtin.set_fact:
+        password_policy_matches: "{{ api | length == 1 and api == intern }}"
+      vars:
+        api: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
+        intern: "{{ lookup('file', local_secrets_path ~ '/vb-intern.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
+
+    - name: Refuse to deploy placeholder or inconsistent secrets
+      ansible.builtin.assert:
+        that:
+          - placeholder_secret_files | length == 0
+          - valkey_password_matches | bool
+          - password_policy_matches | bool
+        fail_msg: >-
+          Secret validation failed. Files still containing a change-me
+          placeholder: {{ placeholder_secret_files }}. The Valkey password in
+          vb-api-valkey.env must equal the one inside VALKEY_URL of
+          vb-api.env.j2, and PASSWORD_MIN_LENGTH must be set in vb-api.env.j2
+          and equal the value in vb-intern.env.j2 (Valkey match:
+          {{ valkey_password_matches }}, password policy match:
+          {{ password_policy_matches }}).
+
     - name: Copy secrets to ~/.env
       no_log: true
       register: secret_copy
@@ -234,14 +306,6 @@
         src: "{{ item.path }}"
         dest: "{{ remote_env_dir }}/{{ item.path | basename }}"
         mode: "0600"
-
-    - name: "Find *.env.j2 in secrets/<stage>/"
-      delegate_to: localhost
-      become: no
-      ansible.builtin.find:
-        paths: "{{ local_secrets_path }}"
-        patterns: "*.env.j2"
-      register: secret_templates
 
     - name: Render secret templates to ~/.env
       no_log: true

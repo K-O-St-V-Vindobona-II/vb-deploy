@@ -10,7 +10,7 @@ Quadlets, and (vault-encrypted) secrets.
 
 | Repo | What | Tech Stack | Deployed as |
 |---|---|---|---|
-| [`vb-api`](../vb-api) | Backend: internal club management system (members/fees, Standesdb, archive, P4x bookkeeping, scheduler jobs, ...) | Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, S3-compatible storage | `vb-api` + `vb-api-pg` (one pod) |
+| [`vb-api`](../vb-api) | Backend: internal club management system (members/fees, Standesdb, archive, P4x bookkeeping, scheduler jobs, ...) | Python 3.14, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, S3-compatible storage | `vb-api` + `vb-api-pg` (one pod) |
 | [`vb-intern`](../vb-intern) | Frontend to `vb-api`: the actual management UI for club members/officials (login required) | Vue 3 (`<script setup>`, TypeScript), Vite, nginx for serving | `vb-intern` |
 | [`vb-www`](../vb-www) | Public, unauthenticated website `www.vindobona2.at` (marketing/info, gallery, contact form) | Vue 3, TypeScript, Vite, nginx | `vb-www` |
 | `vb-deploy` (this repo) | Operations: Ansible, Caddy, Quadlets, secrets | Ansible, systemd Quadlets | doesn't run as a service itself — configures the others |
@@ -41,10 +41,11 @@ second user, `admin`, exists solely for administrative root tasks
 > that would be affected first in the event of a container-escape
 > vulnerability (an attacker breaking out of a compromised container onto
 > the host). If `service` had `sudo` rights, a container escape would
-> simultaneously be a path to full root on the host. Since `service`
-> belongs to **no** privileged group and has **no** `sudo`, a breakout from
-> a container is, at worst, limited to the privileges of an ordinary,
-> unprivileged user — no root, no way to manipulate other
+> simultaneously be a path to full root on the host. Since `service` has
+> **no** `sudo` and belongs to no administrative group (its only
+> supplementary group is `systemd-journal`, which lets it read the system
+> journal but change nothing), a breakout from a container is, at worst,
+> limited to the privileges of an ordinary, unprivileged user - no root, no way to manipulate other
 > containers/data on the host, no access to system configuration. `admin`
 > exists exclusively for humans who need to do administrative tasks
 > (package installation, firewall, SSH config, ...) — this user never
@@ -101,9 +102,12 @@ second user, `admin`, exists solely for administrative root tasks
   store that is truly lost on a VPS loss/reinstall and has to be restored
   from an S3 backup (see [Disaster Recovery](#disaster-recovery--database-restore)
   below).
-- **Dozzle** is a simple, read-only log viewer for all running containers
-  (reads the Podman socket read-only), reachable at
-  `intern.vindobona2.at/logging/dozzle` behind basic auth.
+- **Dozzle** is a log viewer for all running containers, reachable at
+  `intern.vindobona2.at/logging/dozzle` behind basic auth. It is given the
+  Podman API socket of the `service` user, which is full control of every
+  rootless container (the read-only mount flag only protects the socket
+  file, not the API calls). The basic-auth credential is therefore as
+  sensitive as the deployment's secrets: keep it long and random.
 - **podman-prune.timer** cleans up unused images/containers weekly, so the
   VPS's limited disk space doesn't fill up.
 - **Container hardening**: every production `.container` Quadlet carries
@@ -118,10 +122,11 @@ second user, `admin`, exists solely for administrative root tasks
   PID file and temp directories on a `/tmp` tmpfs) and need no capability
   at all; only Caddy adds `CAP_NET_BIND_SERVICE` back to bind port 80/443.
   `.pod`/`.volume` Quadlet units don't
-  support these keys at all (Container-section-only) and the local
-  dev Quadlets under `dev/quadlets/` are deliberately excluded — they bind-mount
-  live-editable source code, which is structurally incompatible with a
-  read-only rootfs.
+  support these keys at all (Container-section-only). The local dev Quadlets
+  under `dev/quadlets/` are deliberately excluded from `ReadOnly=true` - they
+  bind-mount live-editable source code, which is structurally incompatible with
+  a read-only rootfs - but they set `NoNewPrivileges=true`, and
+  `DropCapability=all` for the containers that run unprivileged processes.
 
 ## Complete Cutover / VPS Reinstall (Step-by-Step Runbook)
 
@@ -174,9 +179,12 @@ set up on every family (unattended-upgrades, dnf-automatic, and a daily
   (`ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -`). The legitimate case
   of a changed key is described in the next item.
 - **After a reinstall, SSH reports "REMOTE HOST IDENTIFICATION HAS
-  CHANGED"** (new host key) — this is expected, not a security incident.
-  Remove the old entry: `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>`
-  (for every hostname/IP the host was known under).
+  CHANGED"** (new host key). That is expected after a reinstall, but only
+  once the new key's fingerprint has been compared with the one the
+  provider shows in its console or rescue system; a changed key that no
+  reinstall explains is a possible interception. Only then remove the old
+  entry: `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>` (for every
+  hostname/IP the host was known under).
 
 **3. Run `playbooks/setup_vps.yml`** (see [Phase 1](#phase-1--vps-base-configuration-only-needed-for-a-fresh-setup)
 below for the exact commands). Hardens the host, creates `admin`/`service`,
@@ -686,6 +694,7 @@ via its own Podman Quadlets. The generalized templates live under `dev/`:
 
 ```
 dev/quadlets/api/      vb-api + vb-api-pg + pod
+dev/postgres/          pg_hba.conf for vb-api-pg
 dev/quadlets/intern/   vb-intern
 dev/quadlets/www/      vb-www
 dev/quadlets/garage/   vb-garage (S3 replacement for AWS S3 in dev)
@@ -700,6 +709,9 @@ dev/env/               *.env.example for all five containers
    copy `config/garage/garage.toml` from the repo root to wherever
    `vb-garage.container`'s config volume points (see that file's own
    comments — it needs no local edits, every stage uses the same one).
+   Copy `dev/postgres/pg_hba.conf` to
+   `~/data/vb-api/postgres-config/pg_hba.conf` (PostgreSQL requires a
+   password from every TCP client with it).
 2. Replace the placeholders in the copied Quadlets:
    `<path-to-vb-fastapi-vue>` (path to this 4-repo checkout),
    `<your-mail-dev-domain>`/`<your-garage-dev-domain>` (see Caddy routing
@@ -771,7 +783,7 @@ Alle relevanten Repos sind in der GitHub-Organisation
 
 | Repo | Was | Tech-Stack | Wird deployt als |
 |---|---|---|---|
-| [`vb-api`](../vb-api) | Backend: internes Vereinsverwaltungssystem (Mitglieder/Beiträge, Standesdb, Archiv, P4x-Finanzbuchhaltung, Scheduler-Jobs, ...) | Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, S3-kompatibler Storage | `vb-api` + `vb-api-pg` (ein Pod) |
+| [`vb-api`](../vb-api) | Backend: internes Vereinsverwaltungssystem (Mitglieder/Beiträge, Standesdb, Archiv, P4x-Finanzbuchhaltung, Scheduler-Jobs, ...) | Python 3.14, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, S3-kompatibler Storage | `vb-api` + `vb-api-pg` (ein Pod) |
 | [`vb-intern`](../vb-intern) | Frontend zu `vb-api`: die eigentliche Verwaltungsoberfläche für Vereinsmitglieder/Funktionäre (Login erforderlich) | Vue 3 (`<script setup>`, TypeScript), Vite, nginx zur Auslieferung | `vb-intern` |
 | [`vb-www`](../vb-www) | Öffentliche, unauthentifizierte Website `www.vindobona2.at` (Marketing/Info, Galerie, Kontaktformular) | Vue 3, TypeScript, Vite, nginx | `vb-www` |
 | `vb-deploy` (dieses Repo) | Betrieb: Ansible, Caddy, Quadlets, Secrets | Ansible, systemd Quadlets | läuft nicht selbst als Service — konfiguriert die anderen |
@@ -803,10 +815,12 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
 > der im Fall einer Container-Escape-Schwachstelle (ein Angreifer bricht aus
 > einem kompromittierten Container auf den Host aus) als Erstes betroffen
 > wäre. Hätte `service` `sudo`-Rechte, wäre ein Container-Escape gleichzeitig
-> ein Weg zu vollem Root auf dem Host. Da `service` **keiner** privilegierten
-> Gruppe angehört und **kein** `sudo` hat, bleibt ein Ausbruch aus einem
-> Container im schlimmsten Fall auf die Rechte eines gewöhnlichen,
-> unprivilegierten Users beschränkt — kein Root, keine Möglichkeit, andere
+> ein Weg zu vollem Root auf dem Host. Da `service` **kein** `sudo` hat und
+> keiner administrativen Gruppe angehört (seine einzige zusätzliche Gruppe
+> ist `systemd-journal`, die das Lesen des System-Journals erlaubt, aber
+> nichts verändert), bleibt ein Ausbruch aus einem Container im
+> schlimmsten Fall auf die Rechte eines gewöhnlichen, unprivilegierten
+> Users beschränkt - kein Root, keine Möglichkeit, andere
 > Container/Daten auf dem Host zu manipulieren, keinen Zugriff auf
 > System-Konfiguration. `admin` existiert ausschließlich für Menschen, die
 > administrative Aufgaben (Paketinstallation, Firewall, SSH-Konfig, ...)
@@ -863,9 +877,13 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   Datenbestand, der bei einem VPS-Verlust/Neuaufsetzen wirklich weg ist und
   aus einem S3-Backup zurückgeholt werden muss (siehe
   [Disaster Recovery](#disaster-recovery--datenbank-restore) unten).
-- **Dozzle** ist ein simpler, schreibgeschützter Log-Viewer für alle laufenden
-  Container (liest den Podman-Socket read-only), erreichbar über
-  `intern.vindobona2.at/logging/dozzle` hinter Basic-Auth.
+- **Dozzle** ist ein Log-Viewer für alle laufenden Container, erreichbar über
+  `intern.vindobona2.at/logging/dozzle` hinter Basic-Auth. Er bekommt den
+  Podman-API-Socket des Users `service`, und der bedeutet volle Kontrolle
+  über jeden rootless-Container (das Read-only-Flag des Mounts schützt nur
+  die Socket-Datei, nicht die API-Aufrufe). Das Basic-Auth-Passwort ist
+  deshalb so sensibel wie die Secrets des Deployments: lang und zufällig
+  wählen.
 - **podman-prune.timer** räumt wöchentlich ungenutzte Images/Container auf,
   damit der begrenzte VPS-Plattenplatz nicht volläuft.
 - **Container-Härtung**: Jedes produktive `.container`-Quadlet trägt
@@ -881,9 +899,11 @@ Ein zweiter User `admin` existiert nur für administrative Root-Aufgaben
   einem `/tmp`-tmpfs) und brauchen gar keine Capability; nur Caddy holt
   `CAP_NET_BIND_SERVICE` zurück, um Port 80/443 zu binden. `.pod`-/
   `.volume`-Quadlets unterstützen diese Keys gar nicht (nur
-  Container-Section), und die lokalen Dev-Quadlets unter `dev/quadlets/`
-  sind bewusst ausgenommen — sie binden live-editierbaren Quellcode ein,
-  was mit einem Read-only-Rootfs strukturell unvereinbar ist.
+  Container-Section). Die lokalen Dev-Quadlets unter `dev/quadlets/` sind
+  bewusst von `ReadOnly=true` ausgenommen - sie binden live-editierbaren
+  Quellcode ein, was mit einem Read-only-Rootfs strukturell unvereinbar ist -
+  setzen aber `NoNewPrivileges=true` und, für Container mit unprivilegierten
+  Prozessen, `DropCapability=all`.
 
 ## Kompletter Cutover / VPS-Neuaufsetzen (Schritt-für-Schritt-Runbook)
 
@@ -937,9 +957,13 @@ Automatische Sicherheitsupdates sind auf jeder Familie eingerichtet
   (`ssh-keyscan -t ed25519 <host> | ssh-keygen -lf -`). Der legitime Fall
   eines geänderten Keys steht im nächsten Punkt.
 - **Nach einem Reinstall meldet SSH "REMOTE HOST IDENTIFICATION HAS
-  CHANGED"** (neuer Host-Key) — das ist erwartet, kein Sicherheitsvorfall.
-  Alten Eintrag entfernen: `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>`
-  (für jeden verwendeten Hostnamen/jede IP, unter der der Host bekannt war).
+  CHANGED"** (neuer Host-Key). Das ist nach einem Reinstall erwartet, aber
+  erst, nachdem der Fingerabdruck des neuen Keys mit dem verglichen wurde,
+  den der Provider in seiner Konsole oder im Rescue-System anzeigt; ein
+  geänderter Key, den kein Reinstall erklärt, ist ein möglicher
+  Abfangversuch. Erst dann den alten Eintrag entfernen:
+  `ssh-keygen -f ~/.ssh/known_hosts -R <hostname>` (für jeden verwendeten
+  Hostnamen/jede IP, unter der der Host bekannt war).
 
 **3. `playbooks/setup_vps.yml` ausführen** (siehe [Phase 1](#phase-1--vps-grundkonfiguration-nur-bei-neuaufsetzung-nötig)
 unten für die genauen Befehle). Härtet den Host, legt `admin`/`service` an,
@@ -1478,6 +1502,7 @@ eigene Podman-Quadlets. Die generalisierten Vorlagen liegen unter `dev/`:
 
 ```
 dev/quadlets/api/      vb-api + vb-api-pg + Pod
+dev/postgres/          pg_hba.conf fuer vb-api-pg
 dev/quadlets/intern/   vb-intern
 dev/quadlets/www/      vb-www
 dev/quadlets/garage/   vb-garage (S3-Ersatz fuer AWS S3 in Dev)
@@ -1493,6 +1518,9 @@ dev/env/               *.env.example fuer alle fuenf Container
    dorthin kopieren, wohin `vb-garage.container`s Config-Volume zeigt
    (siehe die Kommentare in dieser Datei selbst — sie braucht keine
    lokalen Anpassungen, jede Stage nutzt dieselbe).
+   `dev/postgres/pg_hba.conf` nach
+   `~/data/vb-api/postgres-config/pg_hba.conf` kopieren (damit verlangt
+   PostgreSQL von jedem TCP-Client ein Passwort).
 2. In den kopierten Quadlets die Platzhalter ersetzen:
    `<path-to-vb-fastapi-vue>` (Pfad zu diesem 4-Repo-Checkout),
    `<your-mail-dev-domain>`/`<your-garage-dev-domain>` (siehe

@@ -242,6 +242,7 @@
       failed_when: false
 
     - name: Generate random passwords
+      no_log: true
       ansible.builtin.set_fact:
         admin_pw: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
         service_pw: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"

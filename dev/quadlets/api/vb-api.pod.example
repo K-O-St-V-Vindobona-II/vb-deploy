@@ -1,6 +1,6 @@
 [Unit]
-Wants=vb-api-valkey.service
-Before=vb-api-valkey.service
+Wants=vb-api-pg.service vb-api.service vb-api-valkey.service vb-api-worker.service
+Before=vb-api-pg.service vb-api.service vb-api-valkey.service vb-api-worker.service
 
 [Pod]
 PodName=vb-api-pod
@@ -13,6 +13,13 @@ PublishPort=127.0.0.1:5432:5432
 # host machine (e.g. a local Mailpit/Garage instance) by hostname.
 AddHost=<your-mail-dev-domain>:host-gateway
 AddHost=<your-garage-dev-domain>:host-gateway
+# Quadlet defaults pods to ExitPolicy=stop, which exits the pod cleanly once its
+# last container disappears - exactly what auto-update does when it stops and
+# recreates one container - so the pod would stay down. "continue" keeps the pod
+# and its infra container alive so the recreated container can rejoin it. Set
+# through PodmanArgs because the dedicated ExitPolicy= key only exists from
+# Podman 5.6.
+PodmanArgs=--exit-policy=continue
 
 [Install]
 WantedBy=default.target

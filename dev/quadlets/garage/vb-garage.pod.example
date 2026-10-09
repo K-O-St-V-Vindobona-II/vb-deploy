@@ -1,5 +1,19 @@
+[Unit]
+Wants=vb-garage.service
+Before=vb-garage.service
+
 [Pod]
 PodName=vb-garage-pod
 PublishPort=127.0.0.1:9000:9000
 PublishPort=127.0.0.1:9001:3903
 AddHost=<your-garage-dev-domain>:host-gateway
+# Quadlet defaults pods to ExitPolicy=stop, which exits the pod cleanly once its
+# last container disappears - exactly what auto-update does when it stops and
+# recreates one container - so the pod would stay down. "continue" keeps the pod
+# and its infra container alive so the recreated container can rejoin it. Set
+# through PodmanArgs because the dedicated ExitPolicy= key only exists from
+# Podman 5.6.
+PodmanArgs=--exit-policy=continue
+
+[Install]
+WantedBy=default.target

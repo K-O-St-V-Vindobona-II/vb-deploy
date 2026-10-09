@@ -5,8 +5,13 @@ After=vb-api-pg.service
 [Container]
 ContainerName=vb-api
 Pod=vb-api.pod
-Image=vb-api:dev
+Image=localhost/vb-api:dev
 AutoUpdate=local
+
+# The dev image runs unprivileged Python processes on an unprivileged port, so
+# it needs no capabilities and must not gain any.
+NoNewPrivileges=true
+DropCapability=all
 
 Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
 UserNS=keep-id

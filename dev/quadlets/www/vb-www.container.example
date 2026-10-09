@@ -11,6 +11,11 @@ PodmanArgs=--workdir=/app
 Exec=npm run dev -- --host 0.0.0.0
 EnvironmentFile=%h/.env/vb-www.env
 
+# The dev server runs as an unprivileged user on an unprivileged port, so it
+# needs no capabilities and must not gain any.
+NoNewPrivileges=true
+DropCapability=all
+
 HealthCmd=node -e 'const h=require("http");h.get("http://localhost:5173/",r=>{process.exit(r.statusCode===200?0:1)}).on("error",()=>process.exit(1))'
 HealthInterval=30s
 HealthTimeout=5s

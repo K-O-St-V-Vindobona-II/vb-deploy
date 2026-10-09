@@ -151,7 +151,7 @@ The runbook is implicitly production; for a new test/QA stage, see
   repo/runbook).
 
 **1. Install a new operating system.** Debian (current stable version),
-UEFI instead of BIOS/legacy (modern standard, no downsides on common
+UEFI instead of classic BIOS (modern standard, no downsides on common
 cloud/VPS providers). `setup_vps.yml` also has branches for the RedHat
 family and SUSE; a complete first installation (setup, deploy, database
 restore, reboot) has been verified on Debian 13, on Rocky Linux 10 and on
@@ -238,7 +238,7 @@ empty database (no members, no data).
 - **`sshpass` installed locally** — Ansible's `ssh` connection plugin
   needs it for any password-based auth (`--ask-pass`/`--ask-become-pass`),
   including the very first `root` login above; without it, those flags
-  fail outright rather than prompting.
+  fail outright rather than asking for the password.
 - A vault password for `secrets/<stage>/*` — normally asked interactively
   via `--ask-vault-pass`. For non-interactive/scripted runs, pass
   `--vault-password-file <path>` instead (any file containing just the
@@ -398,7 +398,7 @@ app by default). "Optional" means the setting has a working default in
 | `vb-api.env.j2` | `S3_REGION` | required (`eu-central-1`) | required (`us-east-1`, must match `config/garage/garage.toml`'s `s3_region` — Garage checks it) |
 | `vb-api.env.j2` | `S3_PATH_*` | optional (sensible defaults) | optional (sensible defaults) |
 | `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | not applicable (downsync refuses to run on production) | required for the downsync job/button (read-only prod-bucket credentials) |
-| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | required (`true` + a real schedule) | optional (`false` — a disposable stage's own backups have little value) |
+| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | required (`true`; the job runs daily at `BACKUP_HOUR`) | optional (`false` - a disposable stage's own backups have little value) |
 | `vb-api.env.j2` | `SMTP_*` | required (real mail delivery) | not set (no mail server for this stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | required (Google Login) | not set (no OAuth app for this stage) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | required | not set |
@@ -762,7 +762,7 @@ podman exec vb-api alembic upgrade head
 scripts/downsync_prod.py --yes` pulls real production data (unchanged, no
 anonymization) from AWS S3 into the local Garage instance and restores the
 local DB from it (`--yes` is required here since a plain `podman exec`
-without `-it` has no TTY for the interactive confirmation prompt). Needs
+without `-it` has no TTY for the interactive confirmation question). Needs
 `~/.env/vb-api-aws-prod.env` (see
 [Scripts](../vb-api/README.md#scripts) in `vb-api`).
 
@@ -927,7 +927,7 @@ ist implizit Production; für eine neue Test-/QA-Stage siehe [Stages](#stages-1)
   Repo/Runbook nicht automatisiert).
 
 **1. Neues Betriebssystem installieren.** Debian (aktuelle stabile Version),
-UEFI statt BIOS/Legacy (moderner Standard, keine Nachteile bei gängigen
+UEFI statt klassischem BIOS (moderner Standard, keine Nachteile bei gängigen
 Cloud-/VPS-Anbietern). `setup_vps.yml` hat außerdem Zweige für die
 RedHat-Familie und SUSE; eine vollständige Erstinstallation (Setup, Deploy,
 Datenbank-Restore, Reboot) wurde auf Debian 13, auf Rocky Linux 10 und auf
@@ -1187,7 +1187,7 @@ er leer bleibt.
 | `vb-api.env.j2` | `S3_REGION` | Pflicht (`eu-central-1`) | Pflicht (`us-east-1`, muss zu `config/garage/garage.toml`s `s3_region` passen — Garage prüft das) |
 | `vb-api.env.j2` | `S3_PATH_*` | optional (sinnvolle Defaults) | optional (sinnvolle Defaults) |
 | `vb-api.env.j2` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET`, `AWS_REGION` | nicht zutreffend (Downsync verweigert sich auf Production) | Pflicht für Downsync-Job/-Button (rein lesende Prod-Bucket-Credentials) |
-| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_INTERVAL_DAYS`/`BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | Pflicht (`true` + echter Zeitplan) | optional (`false` — eigene Backups einer Wegwerf-Stage haben wenig Wert) |
+| `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | Pflicht (`true`; der Job läuft täglich um `BACKUP_HOUR`) | optional (`false` - eigene Backups einer Wegwerf-Stage haben wenig Wert) |
 | `vb-api.env.j2` | `SMTP_*` | Pflicht (echter Mailversand) | nicht gesetzt (kein Mailserver für diese Stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht (Google-Login) | nicht gesetzt (keine OAuth-App für diese Stage) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht | nicht gesetzt |

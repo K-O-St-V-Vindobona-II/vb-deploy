@@ -281,12 +281,28 @@
         api: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
         intern: "{{ lookup('file', local_secrets_path ~ '/vb-intern.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
 
+    # The payment page needs the Aktivitas account; the API only reports a
+    # missing value on the first request to that page, so a forgotten line
+    # is caught here, before the rollout.
+    - name: Look for missing Aktivitas payment settings in the API file
+      no_log: true
+      ansible.builtin.set_fact:
+        missing_aktivitas_settings: "{{ required_names | reject('in', present_names) | list }}"
+      vars:
+        required_names:
+          - AKTIVITAS_ACCOUNT_HOLDER
+          - AKTIVITAS_IBAN
+          - AKTIVITAS_BIC
+          - AKTIVITAS_FEE_TEXT
+        present_names: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^(AKTIVITAS_[A-Z_]+)=\\S', multiline=True) }}"
+
     - name: Refuse to deploy placeholder or inconsistent secrets
       ansible.builtin.assert:
         that:
           - placeholder_secret_files | length == 0
           - valkey_password_matches | bool
           - password_policy_matches | bool
+          - missing_aktivitas_settings | length == 0
         fail_msg: >-
           Secret validation failed. Files still containing a change-me
           placeholder: {{ placeholder_secret_files }}. The Valkey password in
@@ -294,7 +310,9 @@
           vb-api.env.j2, and PASSWORD_MIN_LENGTH must be set in vb-api.env.j2
           and equal the value in vb-intern.env.j2 (Valkey match:
           {{ valkey_password_matches }}, password policy match:
-          {{ password_policy_matches }}).
+          {{ password_policy_matches }}). vb-api.env.j2 must also set a
+          non-empty value for each Aktivitas payment setting; missing:
+          {{ missing_aktivitas_settings }}.
 
     - name: Copy secrets to ~/.env
       no_log: true

@@ -401,6 +401,7 @@ app by default). "Optional" means the setting has a working default in
 | `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | required (`true`; the job runs daily at `BACKUP_HOUR`) | optional (`false` - a disposable stage's own backups have little value) |
 | `vb-api.env.j2` | `SMTP_*` | required (real mail delivery) | not set (no mail server for this stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | required (Google Login) | not set (no OAuth app for this stage) |
+| `vb-api.env.j2` | `AKTIVITAS_ACCOUNT_HOLDER`, `AKTIVITAS_IBAN`, `AKTIVITAS_BIC`, `AKTIVITAS_FEE_TEXT` | required (payment page; `deploy.yml` refuses a file without them, the API refuses a malformed IBAN or BIC) | required (a well-formed sample is enough) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | required | not set |
 | `vb-garage.env.j2` | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, `GARAGE_DEFAULT_BUCKET` | file doesn't exist on production | required |
 
@@ -1190,6 +1191,7 @@ er leer bleibt.
 | `vb-api.env.j2` | `BACKUP_ENABLED` + `BACKUP_HOUR`/`BACKUP_RETENTION_DAYS` | Pflicht (`true`; der Job läuft täglich um `BACKUP_HOUR`) | optional (`false` - eigene Backups einer Wegwerf-Stage haben wenig Wert) |
 | `vb-api.env.j2` | `SMTP_*` | Pflicht (echter Mailversand) | nicht gesetzt (kein Mailserver für diese Stage) |
 | `vb-api.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht (Google-Login) | nicht gesetzt (keine OAuth-App für diese Stage) |
+| `vb-api.env.j2` | `AKTIVITAS_ACCOUNT_HOLDER`, `AKTIVITAS_IBAN`, `AKTIVITAS_BIC`, `AKTIVITAS_FEE_TEXT` | Pflicht (Zahlungsseite; `deploy.yml` verweigert eine Datei ohne sie, die API verweigert eine fehlerhafte IBAN oder BIC) | Pflicht (ein wohlgeformtes Beispiel genügt) |
 | `vb-intern.env.j2` | `GOOGLE_CLIENT_ID` | Pflicht | nicht gesetzt |
 | `vb-garage.env.j2` | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, `GARAGE_DEFAULT_BUCKET` | Datei existiert auf Production nicht | Pflicht |
 

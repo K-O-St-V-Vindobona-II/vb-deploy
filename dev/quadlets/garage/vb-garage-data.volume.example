@@ -1,0 +1,4 @@
+[Volume]
+Device=<path-to-local-garage-data-dir>
+Type=none
+Options=bind

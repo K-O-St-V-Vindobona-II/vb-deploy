@@ -1,0 +1,54 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: '\.j2$'
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      # The tests and the key handling hold dummy key headers.
+      - id: detect-private-key
+        exclude: '^(tests|vb_tools)/'
+
+  - repo: local
+    hooks:
+      # The repository is public: environment files and shell history must
+      # never be committed. The .example files stay.
+      - id: forbid-secret-files
+        name: Forbid environment files and shell history
+        entry: "Environment files and shell history must not be committed"
+        language: fail
+        files: '(^|/)(.*\.env(\.j2)?|\.bash_history)$'
+      - id: no-vault-files-in-this-repository
+        name: Vault encrypted files belong in the private site repository
+        language: system
+        pass_filenames: true
+        entry: >-
+          bash -c 'for f in "$@"; do head -c 14 "$f" | grep -q "^.ANSIBLE_VAULT"
+          && { echo "Vault file in a public repository: $f" >&2; exit 1; };
+          done; exit 0' --
+      - id: no-access-set-in-automation
+        name: Automation must not reference the private access set
+        language: system
+        pass_filenames: true
+        files: ^(playbooks|templates|quadlets|config|site-template|systemd-timers|dev)/
+        entry: >-
+          bash -c '! grep -nEi "vb-access|credentials[._-]?(yml|txt|md)" "$@"
+          || { echo "The access set is a note for humans, never input for automation." >&2; exit 1; }' --
+      # Runs on every commit: the tests also read the handbook, the handover
+      # sheets and the playbooks, so a change to any of them can break one.
+      - id: python-quality
+        name: ruff, pyright and tests of the vb tool
+        language: system
+        pass_filenames: false
+        always_run: true
+        entry: >-
+          bash -c 'uv run --no-project --with-requirements requirements-dev.lock ruff check . &&
+          uv run --no-project --with-requirements requirements-dev.lock ruff format --check . &&
+          uv run --no-project --with-requirements requirements-dev.lock pyright &&
+          uv run --no-project --with-requirements requirements-dev.lock pytest --cov'

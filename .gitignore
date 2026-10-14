@@ -1,0 +1,17 @@
+# Vault password files, key material and decrypted leftovers never belong in
+# this public repository.
+.vault_pass*
+*.retry
+*.log
+*.pem
+*.key
+*.decrypted
+credentials*
+
+# Tooling caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.venv/

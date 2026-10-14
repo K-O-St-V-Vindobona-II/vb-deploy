@@ -1,0 +1,51 @@
+[Unit]
+Description=ARQ Worker for VB API ({{ app_environment }})
+After=vb-api-pg.service vb-api-valkey.service
+
+[Container]
+ContainerName=vb-api-worker
+Pod=vb-api.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-api:{{ vb_api_image_tag | default('latest') }}
+AutoUpdate=registry
+Exec=arq app.worker.WorkerSettings
+EnvironmentFile=%h/.env/vb-api.env
+# The web container's own entrypoint already applies pending migrations on
+# every start - a second container running the same entrypoint concurrently
+# would redundantly (and, with real pending migrations, riskily) race it.
+Environment=SKIP_MIGRATIONS=true
+
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations. The memory limit
+# also covers the tmpfs below.
+PidsLimit=256
+PodmanArgs=--memory=1g
+
+# Ephemeral scratch space in RAM for pg_dump/pg_restore temp files
+# (backup/downsync jobs) - nothing else on the filesystem needs to be
+# writable in this container.
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=256m
+
+# arq records a health key in Valkey while the worker loop is alive; the
+# check reads it. Startup counts as complete only once it passes.
+Notify=healthy
+HealthCmd=arq --check app.worker.WorkerSettings
+HealthInterval=60s
+HealthTimeout=20s
+HealthStartPeriod=60s
+HealthRetries=3
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+# arq's own job-timeout default (300s, unchanged in WorkerSettings) is how
+# long it waits for an in-progress job to finish on SIGTERM before giving
+# up. Set well above that so a routine restart can never cut off a running
+# job mid-way (e.g. a downsync) - only ever hit for a genuinely stuck job.
+TimeoutStopSec=310

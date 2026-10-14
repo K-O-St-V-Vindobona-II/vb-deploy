@@ -1,0 +1,28 @@
+[Unit]
+Description=VB Garage (S3-compatible storage)
+
+[Container]
+ContainerName=vb-garage
+Pod=vb-garage.pod
+Image=docker.io/dxflrs/garage:v2.4.1
+Exec=/garage server --single-node --default-bucket
+
+EnvironmentFile=%h/.env/vb-garage.env
+# Same file every stage uses, see config/garage/garage.toml in the repo root
+# - copy it here once, it never needs stage-specific values (see that file's
+# own comments on why the secrets aren't in it).
+Volume=<path-to-local-garage.toml>:/etc/garage.toml:ro
+Volume=vb-garage-meta.volume:/var/lib/garage/meta
+Volume=vb-garage-data.volume:/var/lib/garage/data
+
+HealthCmd=/garage health -q
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=15s
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

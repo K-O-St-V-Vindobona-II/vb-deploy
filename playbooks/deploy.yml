@@ -1,0 +1,844 @@
+---
+# Day-2 operation: keep secrets, Caddyfile and Quadlets on the production
+# system in sync + (re)start services. Builds NO images, clones NO app
+# repos, restores NO data: the three app images already arrive fully built
+# from ghcr.io and get rolled out automatically by podman-auto-update.timer,
+# which this playbook itself enables + starts below.
+#
+# Everything runs as the unprivileged user "service" over SSH with the
+# operator key; no sudo and no become password are involved.
+#
+# Multi-stage: -i selects the stage, there is no default inventory. The
+# stage's directory (site_dir) holds the inventory and, in its secrets/
+# subdirectory, the Ansible Vault encrypted environment files.
+#
+# Invocation:
+#   ansible-playbook -i <site_dir>/inventory.ini playbooks/deploy.yml \
+#     -e site_dir=<site_dir> --private-key <key> --vault-password-file <file>
+#
+# Immediate deploy instead of waiting for the nightly auto-update run: add
+#   --tags deploy-api
+#   --tags deploy-intern
+#   --tags deploy-www
+# (these tasks run ONLY when the respective tag is explicitly given)
+
+- name: Deploy/sync on the production system
+  hosts: vps
+  remote_user: service
+  gather_facts: yes
+  vars:
+    local_secrets_path: "{{ site_dir }}/secrets"
+    local_quadlets_path: "../quadlets"
+    local_timers_path: "../systemd-timers"
+    local_caddyfile_template: "../config/caddy/Caddyfile.j2"
+    local_api_pod_template: "../templates/vb-api.pod.j2"
+    local_api_quadlet_template: "../templates/vb-api.container.j2"
+    local_pg_quadlet_template: "../templates/vb-api-pg.container.j2"
+    local_pg_hba_file: "../config/postgres/pg_hba.conf"
+    local_app_role_sql_file: "../config/postgres/split-app-role.sql"
+    local_valkey_quadlet_template: "../templates/vb-api-valkey.container.j2"
+    local_worker_quadlet_template: "../templates/vb-api-worker.container.j2"
+    local_garage_quadlet_template: "../templates/vb-garage.container.j2"
+    local_garage_config_file: "../config/garage/garage.toml"
+    local_intern_quadlet_template: "../templates/vb-intern.container.j2"
+    local_www_quadlet_template: "../templates/vb-www.container.j2"
+
+    remote_env_dir: "{{ ansible_user_dir }}/.env"
+    remote_quadlet_base: "{{ ansible_user_dir }}/.config/containers/systemd"
+    remote_systemd_user_dir: "{{ ansible_user_dir }}/.config/systemd/user"
+    remote_caddy_config_dir: "{{ ansible_user_dir }}/.config/vb/infrastructure/caddy"
+    xdg_runtime_dir: "/run/user/{{ ansible_facts.user_uid }}"
+
+    # Environment files that only the containers of the API pod read. A file is
+    # read when a container is created and a rendered Quadlet or Caddyfile only
+    # takes effect on the next start, so a running service keeps its old
+    # secrets and configuration until it is restarted (see the handlers).
+    api_env_files:
+      - vb-api-pg.env
+      - vb-api-valkey.env
+      - vb-api.env
+      - vb-garage.env
+
+    # Quadlet source folder -> destination path under remote_quadlet_base,
+    # for the remaining STATIC Quadlet files (no Jinja2 templating
+    # needed). "api" is deliberately NOT in here anymore: vb-api.pod,
+    # vb-api.container and vb-api-pg.container are all three templates by
+    # now (domain-/stage-/Garage-dependent) - see their own render tasks
+    # further below, including their own "vindobona2.at/api" directory
+    # creation there.
+    quadlet_targets:
+      - { src: caddy, dest: "vb/infrastructure/caddy" }
+      - { src: logging, dest: "vb/logging" }
+      - { src: intern, dest: "vindobona2.at/intern" }
+      - { src: www, dest: "vindobona2.at/www" }
+
+    # Units that get explicitly (re)enabled/started after every sync.
+    # Wants=/After= in the .pod files only takes effect on the VERY FIRST
+    # start of a pod - if the main container (e.g. vb-api.service) is
+    # already running, Ansible's "state: started" leaves it alone, and a
+    # previously failed dependency (e.g. vb-api-pg.service) stays stuck
+    # as "failed" instead of being retried. Hence listing them explicitly
+    # instead of relying on the pod dependency.
+    # vb-garage only on non-production stages, see quadlet_targets above.
+    managed_units: >-
+      {{
+        [
+          'caddy.service', 'logging-dozzle.service', 'vb-api-pg.service',
+          'vb-api-valkey.service', 'vb-api-worker.service',
+          'vb-api.service', 'vb-intern.service', 'vb-www.service',
+        ] + (['vb-garage.service'] if app_environment != 'production' else [])
+      }}
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 0. Validate stage
+    # ------------------------------------------------------------------
+    - name: "Validate stage"
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - app_environment in ['test', 'qa', 'production']
+        fail_msg: >-
+          app_environment must be test, qa, or production (currently:
+          '{{ app_environment }}'). Development instances never run
+          through this repo - only locally via their own Podman Quadlets.
+        success_msg: "Stage '{{ app_environment }}' is valid."
+
+    # The application images are published for linux/amd64 only. On an ARM
+    # server (e.g. the cheaper ARM plans of some providers) they would fail
+    # to start with "exec format error" after the rest was already deployed.
+    - name: Require an x86_64 server
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.architecture == 'x86_64'
+        fail_msg: >-
+          This server is {{ ansible_facts.architecture }}, but the application
+          images are built for x86_64 (amd64) only. Order an x86_64 plan.
+        quiet: true
+
+    - name: Validate the site directory
+      tags: [always]
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ site_dir | default('') }}/secrets"
+      register: site_secrets_dir
+      run_once: true
+
+    - name: Require a site directory with a secrets folder
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - site_dir is defined
+          - site_secrets_dir.stat.isdir | default(false)
+        fail_msg: >-
+          Pass -e site_dir=<directory of the stage> (a directory that contains
+          a secrets/ folder with the stage's environment files).
+
+    - name: Validate stage variables
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - item in vars
+          - "'CHANGEME' not in (lookup('vars', item) | string)"
+        fail_msg: >-
+          Inventory variable '{{ item }}' is missing or still contains the
+          CHANGEME placeholder.
+      loop: >-
+        {{
+          ['acme_email', 'api_domain', 'intern_domain', 'www_domain']
+          + (['storage_domain'] if app_environment != 'production' else [])
+        }}
+
+    # ------------------------------------------------------------------
+    # 1. Ensure directories exist
+    # ------------------------------------------------------------------
+    - name: Create directory structure
+      loop:
+        - "{{ remote_env_dir }}"
+        - "{{ remote_quadlet_base }}"
+        - "{{ remote_systemd_user_dir }}"
+        - "{{ remote_caddy_config_dir }}"
+        - "{{ ansible_user_dir }}/.local/share/caddy/caddy_data"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/valkey"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+
+    # Flat siblings, not nested under a shared "garage/" parent: the chown
+    # below is recursive and would otherwise sweep up that parent directory
+    # itself, locking "service" out of it (and everything Ansible would need
+    # to create or check underneath it, e.g. on a second deploy) the same
+    # way as the leaf directories it is meant to protect.
+    - name: Require enough free disk space for the production mirror (non-production only)
+      ansible.builtin.include_tasks: tasks/require_free_disk.yml
+
+    - name: Create Garage data directories (non-production only, see README 5.4)
+      when: app_environment != 'production'
+      loop:
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-meta"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-data"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-config"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+
+    # Rootless-Podman mapping fix: a freshly created directory belongs to
+    # "service" in the normal UID namespace, but inside the container
+    # sees its own "postgres" user (UID 999) in a mapped namespace -
+    # without this fix, initdb fails on the very first start with
+    # "Permission denied" (empirically verified, see README Appendix B). Both
+    # commands must run under podman unshare, not just the chown -
+    # afterwards the directory belongs to the mapped UID, and "service"
+    # itself can no longer touch it from the outside. A no-op on
+    # already-initialized directories (chown/chmod are idempotent).
+    - name: Ensure Postgres data directory ownership (rootless mapping)
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
+
+    - name: Ensure Postgres data directory permissions
+      ansible.builtin.command: >-
+        podman unshare chmod 700
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres
+      changed_when: false
+
+    - name: Create Postgres config directory
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres-config"
+        state: directory
+        mode: "0700"
+
+    # World-readable on purpose: inside the container the server runs as
+    # UID 999 and must read a file owned by the mapped UID 0; it contains no
+    # secrets (only the password-required TCP rule, see the file itself).
+    - name: Install pg_hba.conf (password required for every TCP client)
+      notify: Restart API pod
+      ansible.builtin.copy:
+        src: "{{ local_pg_hba_file }}"
+        dest: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/postgres-config/pg_hba.conf"
+        mode: "0644"
+
+    # Same rootless-mapping fix as Postgres/Valkey above: the vb-garage
+    # Quadlet starts the container directly as UID 999, which requires both
+    # data directories to already be owned by that UID before the container's
+    # own process (no chown/privilege-drop mechanism at all, see the Quadlet)
+    # ever runs. A no-op on already-initialized directories. Each directory
+    # is chowned on its own (not the shared parent) - see the directory
+    # creation task above for why.
+    - name: Ensure Garage data directory ownership (rootless mapping)
+      when: app_environment != 'production'
+      loop:
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-meta"
+        - "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-data"
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999 {{ item }}
+      changed_when: false
+
+    # World-readable on purpose, same reasoning as pg_hba.conf above; it
+    # contains no secrets either (see the file's own comments - the RPC
+    # secret and admin token travel as environment variables instead).
+    - name: Install garage.toml
+      when: app_environment != 'production'
+      notify: Restart API pod
+      ansible.builtin.copy:
+        src: "{{ local_garage_config_file }}"
+        dest: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-config/garage.toml"
+        mode: "0644"
+
+    # Same rootless-mapping fix as Postgres above: the vb-api-valkey Quadlet
+    # now starts the container directly as UID 999 (the "valkey" user's
+    # mapped UID) to run fully capability-less, which requires this
+    # directory to already be owned by that UID before the container's own
+    # entrypoint - which only chowns/re-execs when started as root - ever
+    # runs. A no-op on already-initialized directories.
+    - name: Ensure Valkey data directory ownership (rootless mapping)
+      ansible.builtin.command: >-
+        podman unshare chown -R 999:999
+        {{ ansible_user_dir }}/data/vb/{{ app_environment }}/valkey
+      changed_when: false
+
+    # ------------------------------------------------------------------
+    # 2. Distribute secrets (ansible-vault-encrypted in the repo, Ansible
+    #    decrypts transparently while copying/rendering). Two pairs:
+    #    static *.env files get copied 1:1, *.env.j2 files first get
+    #    rendered with the stage/domain vars from the inventory (vault
+    #    decryption happens first, Jinja2 templating after - no
+    #    collision).
+    # ------------------------------------------------------------------
+    - name: "Find *.env in the secrets folder of the site"
+      delegate_to: localhost
+      ansible.builtin.find:
+        paths: "{{ local_secrets_path }}"
+        patterns: "*.env"
+      register: secret_files
+
+    - name: "Find *.env.j2 in the secrets folder of the site"
+      delegate_to: localhost
+      ansible.builtin.find:
+        paths: "{{ local_secrets_path }}"
+        patterns: "*.env.j2"
+      register: secret_templates
+
+    # The vault files are decrypted in memory on the control node only. The
+    # values never reach the output: they are compared inside no_log facts and
+    # only the resulting booleans and file names are asserted afterwards.
+    # The PostgreSQL password is not compared: the API connects as its own
+    # role (vb_app) whose password is set from DATABASE_URL further below, so
+    # it is deliberately not the bootstrap password of vb-api-pg.env.
+    - name: Look for placeholder values in the secret files
+      when: (secret_files.files + secret_templates.files) | length > 0
+      no_log: true
+      ansible.builtin.set_fact:
+        placeholder_secret_files: >-
+          {{
+            (secret_files.files + secret_templates.files) | map(attribute='path') | list
+            | zip(query('ansible.builtin.file', *((secret_files.files + secret_templates.files) | map(attribute='path') | list)))
+            | selectattr('1', 'search', 'change-me')
+            | map(attribute='0') | map('basename') | list
+          }}
+
+    - name: Compare the Valkey password in its two files
+      no_log: true
+      ansible.builtin.set_fact:
+        valkey_password_matches: "{{ own | length == 1 and own == used }}"
+      vars:
+        own: "{{ lookup('file', local_secrets_path ~ '/vb-api-valkey.env') | regex_findall('^VALKEY_PASSWORD=(.+)$', multiline=True) }}"
+        used: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^VALKEY_URL=[^:]+://[^:]*:([^@]*)@', multiline=True) }}"
+
+    - name: Compare the password policy in the API and intern files
+      no_log: true
+      ansible.builtin.set_fact:
+        password_policy_matches: "{{ api | length == 1 and api == intern }}"
+      vars:
+        api: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
+        intern: "{{ lookup('file', local_secrets_path ~ '/vb-intern.env.j2') | regex_findall('^PASSWORD_MIN_LENGTH=(.+)$', multiline=True) }}"
+
+    # The payment page needs the Aktivitas account; the API only reports a
+    # missing value on the first request to that page, so a forgotten line
+    # is caught here, before the rollout.
+    - name: Look for missing Aktivitas payment settings in the API file
+      no_log: true
+      ansible.builtin.set_fact:
+        missing_aktivitas_settings: "{{ required_names | reject('in', present_names) | list }}"
+      vars:
+        required_names:
+          - AKTIVITAS_ACCOUNT_HOLDER
+          - AKTIVITAS_IBAN
+          - AKTIVITAS_BIC
+          - AKTIVITAS_FEE_TEXT
+        present_names: "{{ lookup('file', local_secrets_path ~ '/vb-api.env.j2') | regex_findall('^(AKTIVITAS_[A-Z_]+)=\\S', multiline=True) }}"
+
+    - name: Refuse to deploy placeholder or inconsistent secrets
+      ansible.builtin.assert:
+        that:
+          - placeholder_secret_files | length == 0
+          - valkey_password_matches | bool
+          - password_policy_matches | bool
+          - missing_aktivitas_settings | length == 0
+        fail_msg: >-
+          Secret validation failed. Files still containing a change-me
+          placeholder: {{ placeholder_secret_files }}. The Valkey password in
+          vb-api-valkey.env must equal the one inside VALKEY_URL of
+          vb-api.env.j2, and PASSWORD_MIN_LENGTH must be set in vb-api.env.j2
+          and equal the value in vb-intern.env.j2 (Valkey match:
+          {{ valkey_password_matches }}, password policy match:
+          {{ password_policy_matches }}). vb-api.env.j2 must also set a
+          non-empty value for each Aktivitas payment setting; missing:
+          {{ missing_aktivitas_settings }}.
+
+    - name: Copy secrets to ~/.env
+      no_log: true
+      register: secret_copy
+      loop: "{{ secret_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ remote_env_dir }}/{{ item.path | basename }}"
+        mode: "0600"
+
+    - name: Render secret templates to ~/.env
+      no_log: true
+      register: secret_render
+      loop: "{{ secret_templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ remote_env_dir }}/{{ item.path | basename | regex_replace('\\.j2$', '') }}"
+        mode: "0600"
+
+    # ------------------------------------------------------------------
+    # 3. Render Caddyfile (hosts come from the stage domain vars)
+    # ------------------------------------------------------------------
+    - name: Render Caddyfile
+      notify: Restart caddy
+      ansible.builtin.template:
+        src: "{{ local_caddyfile_template }}"
+        dest: "{{ remote_caddy_config_dir }}/Caddyfile"
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 4. Sync Quadlets
+    # ------------------------------------------------------------------
+    - name: Create Quadlet directories
+      loop: "{{ quadlet_targets }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      ansible.builtin.file:
+        path: "{{ remote_quadlet_base }}/{{ item.dest }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Quadlet files
+      register: quadlet_copy
+      loop: "{{ quadlet_targets }}"
+      loop_control:
+        label: "{{ item.dest }}"
+      ansible.builtin.copy:
+        src: "{{ local_quadlets_path }}/{{ item.src }}/"
+        dest: "{{ remote_quadlet_base }}/{{ item.dest }}/"
+        mode: "0644"
+
+    - name: Create vindobona2.at/api directory (templates only, no static copy task for it)
+      ansible.builtin.file:
+        path: "{{ remote_quadlet_base }}/vindobona2.at/api"
+        state: directory
+        mode: "0755"
+
+    - name: Render API pod (domain comes from app_environment, Garage ports non-production only)
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_api_pod_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.pod"
+        mode: "0644"
+
+    - name: Render API Quadlet
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_api_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api.container"
+        mode: "0644"
+
+    - name: Render Postgres Quadlet (data path comes from app_environment)
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_pg_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-pg.container"
+        mode: "0644"
+
+    - name: Render Valkey Quadlet (data path comes from app_environment; joins vb-api.pod like vb-api-pg, no PublishPort)
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_valkey_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-valkey.container"
+        mode: "0644"
+
+    - name: Render ARQ worker Quadlet (reuses the vb-api image, Exec= overrides its default CMD)
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_worker_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-api-worker.container"
+        mode: "0644"
+
+    - name: Render Garage Quadlet (non-production only; shares vb-api.pod, see the pod-network comment there)
+      when: app_environment != 'production'
+      notify: Restart API pod
+      ansible.builtin.template:
+        src: "{{ local_garage_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/api/vb-garage.container"
+        mode: "0644"
+
+    - name: 'Render intern Quadlet (Description shows the real stage instead of hardcoded "Prod")'
+      notify: Restart intern pod
+      ansible.builtin.template:
+        src: "{{ local_intern_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/intern/vb-intern.container"
+        mode: "0644"
+
+    - name: 'Render www Quadlet (Description shows the real stage instead of hardcoded "Prod")'
+      notify: Restart www pod
+      ansible.builtin.template:
+        src: "{{ local_www_quadlet_template }}"
+        dest: "{{ remote_quadlet_base }}/vindobona2.at/www/vb-www.container"
+        mode: "0644"
+
+    - name: Copy native systemd units (podman-prune service + timer, not Quadlets, own destination path)
+      ansible.builtin.copy:
+        src: "{{ local_timers_path }}/"
+        dest: "{{ remote_systemd_user_dir }}/"
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 5. Work out which services must be restarted, make new/changed units
+    #    known, then restart exactly those. Looped tasks cannot notify
+    #    selectively (any changed item triggers every handler named in the
+    #    loop), so the changed items are read from the registered results and
+    #    each group is flagged by its own task.
+    # ------------------------------------------------------------------
+    - name: Note which secret files and Quadlet folders changed
+      ansible.builtin.set_fact:
+        changed_secret_files: >-
+          {{
+            (secret_copy.results | selectattr('changed') | map(attribute='item.path') | map('basename') | list)
+            + (secret_render.results | selectattr('changed') | map(attribute='item.path') | map('basename') | map('regex_replace', '[.]j2$', '') | list)
+          }}
+        changed_quadlet_sources: "{{ quadlet_copy.results | selectattr('changed') | map(attribute='item.src') | list }}"
+
+    - name: Flag caddy for restart (environment file or Quadlet changed)
+      when: "'caddy.env' in changed_secret_files or 'caddy' in changed_quadlet_sources"
+      ansible.builtin.debug:
+        msg: caddy.service will be restarted
+      changed_when: true
+      notify: Restart caddy
+
+    - name: Flag Dozzle for restart (Quadlet changed)
+      when: "'logging' in changed_quadlet_sources"
+      ansible.builtin.debug:
+        msg: logging-dozzle.service will be restarted
+      changed_when: true
+      notify: Restart Dozzle
+
+    - name: Flag the API pod for restart (environment file changed)
+      when: changed_secret_files | intersect(api_env_files) | length > 0
+      ansible.builtin.debug:
+        msg: vb-api-pod.service will be restarted
+      changed_when: true
+      notify: Restart API pod
+
+    - name: Flag the intern pod for restart (environment file or pod Quadlet changed)
+      when: "'vb-intern.env' in changed_secret_files or 'intern' in changed_quadlet_sources"
+      ansible.builtin.debug:
+        msg: vb-intern-pod.service will be restarted
+      changed_when: true
+      notify: Restart intern pod
+
+    - name: Flag the www pod for restart (environment file or pod Quadlet changed)
+      when: "'vb-www.env' in changed_secret_files or 'www' in changed_quadlet_sources"
+      ansible.builtin.debug:
+        msg: vb-www-pod.service will be restarted
+      changed_when: true
+      notify: Restart www pod
+
+    - name: systemctl --user daemon-reload
+      ansible.builtin.systemd:
+        scope: user
+        daemon_reload: yes
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    # Restart before the start step below: on a first deployment the restart
+    # is the first start, on later runs it applies the changed files.
+    - name: Restart services whose files changed
+      ansible.builtin.meta: flush_handlers
+
+    # ------------------------------------------------------------------
+    # 6. (Re)start/enable services + timers
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 5b. Application database role. The API connects as "vb_app", a
+    #     non-superuser that owns the database, never as the bootstrap role.
+    #     The script is idempotent, so it runs on every deploy: on a fresh
+    #     host it creates the role before the API starts (otherwise the API
+    #     cannot log in), on an existing database it changes nothing, and a
+    #     rotated password in DATABASE_URL is applied to the role as well.
+    # ------------------------------------------------------------------
+    - name: Start PostgreSQL before the application role is set up
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-api-pg.service
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Read the rendered API environment file (for the application role password)
+      ansible.builtin.slurp:
+        src: "{{ remote_env_dir }}/vb-api.env"
+      register: api_env_raw
+
+    - name: Extract the application role password from DATABASE_URL
+      no_log: true
+      ansible.builtin.set_fact:
+        vb_app_password: >-
+          {{ (api_env_raw.content | b64decode | regex_findall('^DATABASE_URL=[^:]+://vb_app:([^@]*)@', multiline=True) | first | default('')) }}
+
+    # The password goes into the URL as it is, so only characters that need no
+    # URL escaping are accepted: the value in the URL is then also the value
+    # the role must have.
+    - name: Ensure the application role password can be used unescaped
+      no_log: true
+      ansible.builtin.assert:
+        that:
+          - vb_app_password is match('^[A-Za-z0-9._~-]{16,}$')
+        fail_msg: >-
+          DATABASE_URL must use the user vb_app with a password of at least 16
+          characters from A-Z, a-z, 0-9 and . _ ~ - (no URL escaping).
+
+    - name: Create or update the application database role and its ownership
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - -i
+          - -e
+          - VB_APP_PASSWORD
+          - vb-api-pg
+          - psql
+          - -U
+          - vb
+          - -d
+          - vb
+          - -v
+          - ON_ERROR_STOP=1
+        stdin: "{{ lookup('ansible.builtin.file', local_app_role_sql_file) }}"
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+        VB_APP_PASSWORD: "{{ vb_app_password }}"
+      register: app_role_result
+      # The first start of PostgreSQL creates the data directory, which took
+      # about 40 seconds on a small server; the role can only be created once
+      # the database accepts connections. Three minutes cover slow disks too.
+      retries: 60
+      delay: 3
+      until: app_role_result.rc == 0
+      # The script only converges to the wanted state, so a run that changes
+      # nothing must not be reported as a change.
+      changed_when: false
+
+    - name: Enable + start services
+      loop: "{{ managed_units }}"
+      ansible.builtin.systemd:
+        scope: user
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    # ------------------------------------------------------------------
+    # 6b. Bucket CORS (non-production only; the default bucket itself comes
+    #     from GARAGE_DEFAULT_BUCKET, read by the container's own entrypoint
+    #     on first start - this only sets the one thing that flag cannot:
+    #     the browser can otherwise not read a presigned URL's response
+    #     cross-origin. Idempotent (a "set" call, not an "add"), so it runs
+    #     on every deploy rather than only when something changed - cheap,
+    #     and self-healing if a bucket was ever recreated by hand.
+    # ------------------------------------------------------------------
+    - name: Read the rendered Garage environment file (for the S3 key and bucket name)
+      when: app_environment != 'production'
+      ansible.builtin.slurp:
+        src: "{{ remote_env_dir }}/vb-garage.env"
+      register: garage_env_raw
+
+    # The admin API's UpdateBucket (corsConfig) answers 200 without error but
+    # does not actually persist the policy - GetBucketCors keeps reporting
+    # NoSuchCORSConfiguration afterwards (empirically verified). The genuine
+    # S3 API's PutBucketCors does work, verified the same way, so this uses
+    # that instead, through vb-api's own boto3 (already installed, already
+    # has network access to Garage over the shared pod's loopback) rather
+    # than hand-rolling SigV4 signing in a raw HTTP task.
+    - name: Extract the Garage S3 key and bucket name
+      when: app_environment != 'production'
+      ansible.builtin.set_fact:
+        garage_access_key: >-
+          {{ (garage_env_raw.content | b64decode | regex_findall('^GARAGE_DEFAULT_ACCESS_KEY=(.*)$', multiline=True))[0] }}
+        garage_secret_key: >-
+          {{ (garage_env_raw.content | b64decode | regex_findall('^GARAGE_DEFAULT_SECRET_KEY=(.*)$', multiline=True))[0] }}
+        garage_bucket_name: >-
+          {{ (garage_env_raw.content | b64decode | regex_findall('^GARAGE_DEFAULT_BUCKET=(.*)$', multiline=True))[0] }}
+
+    # A restart of the pod (e.g. a changed garage.toml) can report the pod
+    # itself as active before Garage's own container has finished starting up
+    # (Notify=healthy is set on the container unit, not the pod unit), and
+    # vb-api takes a moment longer still (its own migrations run first, on a
+    # new server also the creation of the database) - retry for up to a minute
+    # instead of racing either of them.
+    - name: Set the default bucket's CORS policy (browsers reading presigned URLs cross-origin)
+      when: app_environment != 'production'
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - vb-api
+          - python3
+          - -c
+          - |
+            import boto3
+            from botocore.client import Config
+            client = boto3.client(
+                "s3", endpoint_url="http://127.0.0.1:9000",
+                aws_access_key_id="{{ garage_access_key }}",
+                aws_secret_access_key="{{ garage_secret_key }}",
+                region_name="us-east-1", config=Config(signature_version="s3v4"),
+            )
+            client.put_bucket_cors(
+                Bucket="{{ garage_bucket_name }}",
+                CORSConfiguration={"CORSRules": [{
+                    "AllowedOrigins": ["https://{{ intern_domain }}", "https://{{ www_domain }}"],
+                    "AllowedMethods": ["GET"],
+                    "AllowedHeaders": ["*"],
+                    "MaxAgeSeconds": 3600,
+                }]},
+            )
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      register: garage_cors_result
+      retries: 30
+      delay: 2
+      until: garage_cors_result.rc == 0
+      changed_when: true
+
+    # The application identity is limited to its one bucket: Garage gives the
+    # default key read and write access to that bucket only, and this removes
+    # the one remaining extra right (creating further buckets). The key is
+    # not an administrator; the admin API and the cluster use their own
+    # secrets. Denying twice is not an error, so this runs on every deploy.
+    - name: Deny the application's S3 key the right to create buckets
+      when: app_environment != 'production'
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - vb-garage
+          - /garage
+          - key
+          - deny
+          - --create-bucket
+          - "{{ garage_access_key }}"
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      register: garage_key_deny_result
+      retries: 30
+      delay: 2
+      until: garage_key_deny_result.rc == 0
+      changed_when: false
+
+    - name: Enable + start podman-prune.timer
+      ansible.builtin.systemd:
+        scope: user
+        name: podman-prune.timer
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Enable + start podman-auto-update.timer
+      ansible.builtin.systemd:
+        scope: user
+        name: podman-auto-update.timer
+        enabled: yes
+        state: started
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    # ------------------------------------------------------------------
+    # 7. Optional immediate deploy (only with explicit --tags)
+    # ------------------------------------------------------------------
+    - name: "Immediate deploy vb-api: pull image"
+      tags: [never, deploy-api]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-api:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Immediate deploy vb-api: restart pod"
+      # Do NOT restart vb-api.service directly: the container is bound
+      # to vb-api-pod.service via a generated BindsTo= - restarting the
+      # container stops (and removes) the whole pod, but nothing then
+      # starts the pod back up on its own ("Dependency failed",
+      # empirically verified). The pod service itself correctly brings
+      # all its containers back up via Wants=/Before= on restart.
+      tags: [never, deploy-api]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-api-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: "Immediate deploy vb-intern: pull image"
+      tags: [never, deploy-intern]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-intern:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Immediate deploy vb-intern: restart pod"
+      # See the comment for vb-api above - pod service instead of
+      # container service.
+      tags: [never, deploy-intern]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-intern-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: "Immediate deploy vb-www: pull image"
+      tags: [never, deploy-www]
+      ansible.builtin.command: podman pull ghcr.io/k-o-st-v-vindobona-ii/vb-www:latest
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+      changed_when: true
+
+    - name: "Immediate deploy vb-www: restart pod"
+      # See the comment for vb-api above - pod service instead of
+      # container service.
+      tags: [never, deploy-www]
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-www-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+  handlers:
+    # A pod is restarted through its pod unit, never through a member
+    # container (see the immediate-deploy tasks above).
+    - name: Restart caddy
+      ansible.builtin.systemd:
+        scope: user
+        name: caddy.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Restart Dozzle
+      ansible.builtin.systemd:
+        scope: user
+        name: logging-dozzle.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Restart API pod
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-api-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Restart intern pod
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-intern-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+
+    - name: Restart www pod
+      ansible.builtin.systemd:
+        scope: user
+        name: vb-www-pod.service
+        state: restarted
+      environment:
+        XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"

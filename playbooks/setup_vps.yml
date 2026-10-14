@@ -1,0 +1,657 @@
+---
+# Base configuration for a new VPS: bare system -> hardened,
+# rootless-Podman-capable system with the "admin" and "service" users.
+#
+# The inventory of the stage must define operator_public_keys: the list of
+# public keys that may log in as "admin" and "service". Exactly these keys are
+# installed for both users, every other key is removed. The matching private
+# key is passed with --private-key; no password is ever stored for either user.
+#
+# First run (root, with the key or, if the provider only gave a password, -k):
+#   ansible-playbook -i <inventory> playbooks/setup_vps.yml -u root --private-key <key> [-k]
+# Re-runs (root SSH login and password login are disabled at the end of the
+# first run, "admin" may use sudo without a password):
+#   ansible-playbook -i <inventory> playbooks/setup_vps.yml -u admin --private-key <key>
+#
+# This playbook is the bus-factor safety net in case the production system
+# ever needs a full reinstall. A re-run is verification, not routine
+# operation: --check --diff reports "no change" only on a host that was set
+# up with the current version of this playbook; every difference it lists
+# is a setting that the host does not have yet.
+
+- name: Base configuration for a new VPS
+  hosts: all
+  become: yes
+  vars:
+    # Minimum Podman major version this playbook requires, regardless of
+    # os_family/distribution - checked once, uniformly, right after the
+    # native package install (see task 2 below). Deliberately no
+    # third-party-repo fallback for distros whose own repos ship an older
+    # Podman: that would mean depending on a single-maintainer OBS project's
+    # long-term availability and an extra, unofficial signing key trusted on
+    # every host, just to keep provisioning brand-new hosts on an already
+    # aging release branch. Failing loudly here and pointing at a current
+    # release is the right call for a "fresh OS install" runbook.
+    minimum_podman_major_version: 5
+
+  tasks:
+    # ------------------------------------------------------------------
+    # 0. Input validation (before anything on the host is changed)
+    # ------------------------------------------------------------------
+    - name: Check that operator_public_keys holds one-line public keys
+      # The keys are the only way into the host once the SSH hardening is
+      # done, so an empty or malformed list must stop the run before anything
+      # is changed. The pattern accepts a bare key with an optional comment and
+      # nothing else: no options such as command=, no multi-line value, which
+      # also rejects a private key pasted into the inventory by mistake.
+      vars:
+        public_key_pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^\r\n]*)?$'
+      ansible.builtin.assert:
+        that:
+          - operator_public_keys is defined
+          - operator_public_keys is not string
+          - operator_public_keys | length > 0
+          - operator_public_keys | reject('match', public_key_pattern) | list | length == 0
+          - operator_public_keys | select('search', 'CHANGEME') | list | length == 0
+        fail_msg: >-
+          operator_public_keys must be set in the inventory as a non-empty
+          list of one-line public keys (ssh-ed25519 AAAA... comment), without
+          the CHANGEME placeholder. Never put a private key here.
+        quiet: true
+
+    # ------------------------------------------------------------------
+    # 1. Full upgrade + core packages, Podman from each distro's own
+    #    native repo (step 2 checks whether the version is sufficient).
+    #    "passt" (provides the "pasta" binary) instead of "slirp4netns":
+    #    since Podman 5, pasta is the rootless-networking default
+    #    (containers.conf: default_rootless_network_cmd=pasta), both for
+    #    an explicit "Network=pasta:..." (vb-api-pod) and for pods
+    #    without their own Network= line (vb-intern-pod/vb-www-pod use
+    #    the default). slirp4netns is never used anywhere in this stack
+    #    and is therefore no longer installed.
+    # ------------------------------------------------------------------
+    - name: Full upgrade + install core packages (Debian)
+      when: ansible_os_family == "Debian"
+      block:
+        - ansible.builtin.apt:
+            update_cache: yes
+            upgrade: dist
+        - ansible.builtin.apt:
+            name:
+              - git
+              - podman
+              - netavark
+              - aardvark-dns
+              - ufw
+              - sudo
+              - uidmap
+              - dbus-user-session
+              - passt
+              # Only a Recommends of the podman package, not a hard Depends -
+              # silently missing on any image with APT::Install-Recommends
+              # disabled (common on minimal cloud images), which then makes
+              # every "podman pod create" fail ("finding pause binary: exec:
+              # \"catatonit\": executable file not found in $PATH").
+              - catatonit
+              - curl
+              - tar
+            state: present
+
+    - name: Full upgrade + install core packages (RedHat)
+      when: ansible_os_family == "RedHat"
+      block:
+        - ansible.builtin.dnf:
+            name: "*"
+            state: latest
+        - ansible.builtin.dnf:
+            name:
+              - git
+              - podman
+              - netavark
+              - aardvark-dns
+              - firewalld
+              - sudo
+              - shadow-utils
+              - passt
+              - curl
+              - tar
+            state: present
+
+    - name: Full upgrade + install core packages (SUSE)
+      when: ansible_os_family == "Suse"
+      block:
+        - community.general.zypper:
+            name: "*"
+            state: latest
+        - community.general.zypper:
+            name:
+              - git
+              - podman
+              - netavark
+              - aardvark-dns
+              - firewalld
+              - sudo
+              - shadow
+              - passt
+              - curl
+              - tar
+            state: present
+
+    # ------------------------------------------------------------------
+    # 1b. Automatic security updates. The host is internet-facing and this
+    #     playbook is only re-run for verification, so kernel, OpenSSH, libc
+    #     and Podman fixes would otherwise wait for a manual run. Only
+    #     security updates are applied; a pending reboot (kernel) stays a
+    #     manual decision - Debian marks it in /var/run/reboot-required.
+    # ------------------------------------------------------------------
+    - name: Enable unattended security updates (Debian)
+      when: ansible_os_family == "Debian"
+      block:
+        - ansible.builtin.apt:
+            name: unattended-upgrades
+            state: present
+        - ansible.builtin.copy:
+            dest: /etc/apt/apt.conf.d/20auto-upgrades
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              APT::Periodic::Update-Package-Lists "1";
+              APT::Periodic::Unattended-Upgrade "1";
+
+    - name: Enable automatic security updates (RedHat)
+      when: ansible_os_family == "RedHat"
+      block:
+        - ansible.builtin.dnf:
+            name: dnf-automatic
+            state: present
+        - ansible.builtin.lineinfile:
+            path: /etc/dnf/automatic.conf
+            regexp: "^upgrade_type\\s*="
+            line: "upgrade_type = security"
+        - ansible.builtin.lineinfile:
+            path: /etc/dnf/automatic.conf
+            regexp: "^apply_updates\\s*="
+            line: "apply_updates = yes"
+        - ansible.builtin.systemd:
+            name: dnf-automatic.timer
+            state: started
+            enabled: yes
+
+    # SUSE ships no ready-made timer for this, so a small one is installed:
+    # zypper applies only the patches of the category "security". Exit code
+    # 102 (a reboot is needed) and 103 (zypper updated itself) are results,
+    # not failures.
+    - name: Enable automatic security updates (SUSE)
+      when: ansible_os_family == "Suse"
+      block:
+        - ansible.builtin.copy:
+            dest: /etc/systemd/system/vb-security-updates.service
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Install pending security patches
+              Wants=network-online.target
+              After=network-online.target
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/bin/zypper --non-interactive patch --category security --auto-agree-with-licenses
+              SuccessExitStatus=102 103
+        - ansible.builtin.copy:
+            dest: /etc/systemd/system/vb-security-updates.timer
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              Description=Install pending security patches every day
+
+              [Timer]
+              OnCalendar=daily
+              RandomizedDelaySec=1h
+              Persistent=true
+
+              [Install]
+              WantedBy=timers.target
+        - ansible.builtin.systemd:
+            name: vb-security-updates.timer
+            state: started
+            enabled: yes
+            daemon_reload: yes
+
+    # ------------------------------------------------------------------
+    # 2. Check the Podman version - fail fast instead of a third-party
+    #    fallback. Current default images (verified as of 2026-08-27:
+    #    Debian 13, Ubuntu >=25.10, Rocky/Alma/CentOS Stream 10, openSUSE
+    #    Leap 16.0, Fedora) already ship Podman >=5 natively. Running
+    #    this playbook against an older release branch (Debian 12, Ubuntu
+    #    24.04 LTS, RHEL 9, openSUSE Leap 15.x - all still on Podman 4.x)
+    #    gets a clear abort instead of a silent third-party fix - see the
+    #    rationale at minimum_podman_major_version above.
+    # ------------------------------------------------------------------
+    - name: Determine installed Podman version
+      ansible.builtin.command: podman --version
+      register: podman_version_check
+      changed_when: false
+      check_mode: false
+
+    - name: Extract Podman major version
+      ansible.builtin.set_fact:
+        podman_major_version: "{{ podman_version_check.stdout.split()[-1].split('.')[0] | int }}"
+
+    - name: Ensure minimum Podman version
+      ansible.builtin.assert:
+        that:
+          - podman_major_version | int >= minimum_podman_major_version | int
+        fail_msg: >-
+          {{ ansible_distribution }} {{ ansible_distribution_version }}
+          only ships {{ podman_version_check.stdout }} natively (required:
+          major version >={{ minimum_podman_major_version }}). This
+          release branch is too old for this playbook - reinstall a
+          current release branch of the same distribution (see README
+          section 1.2) instead of continuing to run this host.
+        success_msg: >-
+          Native {{ podman_version_check.stdout }} meets the minimum
+          requirement (major version >={{ minimum_podman_major_version }}).
+
+    # ------------------------------------------------------------------
+    # 3. User management: "admin" (sudo) + "service" (rootless Podman)
+    #    Neither user has a password. Both log in with the operator key only;
+    #    their passwords are locked at the very end of the play, after the key
+    #    logins were proven (see section 9). "admin" may use sudo without a
+    #    password, "service" has no sudo rights at all: everything that runs
+    #    on the internet-facing side stays unprivileged.
+    # ------------------------------------------------------------------
+    - name: Create user "admin"
+      ansible.builtin.user:
+        name: admin
+        shell: /bin/bash
+        state: present
+
+    - name: Create user "service"
+      ansible.builtin.user:
+        name: service
+        shell: /bin/bash
+        state: present
+
+    - name: Check whether the "systemd-journal" group exists
+      ansible.builtin.command: getent group systemd-journal
+      register: journal_group_check
+      changed_when: false
+      failed_when: false
+
+    - name: Add user "service" to systemd-journal
+      when: journal_group_check.rc == 0
+      ansible.builtin.user:
+        name: service
+        groups: systemd-journal
+        append: yes
+
+    # The only privilege rule for "admin", the same on every distribution. The
+    # file is checked with visudo before it replaces the live one, so a typo
+    # cannot break sudo for everyone.
+    - name: Allow "admin" to use sudo without a password
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/90-vb-admin
+        owner: root
+        group: root
+        mode: "0440"
+        content: |
+          admin ALL=(ALL) NOPASSWD: ALL
+        validate: /usr/sbin/visudo -cf %s
+
+    # ------------------------------------------------------------------
+    # 4. Persistent systemd journal
+    # ------------------------------------------------------------------
+    - name: Create /var/log/journal (if the systemd-journal group exists)
+      when: journal_group_check.rc == 0
+      ansible.builtin.file:
+        path: /var/log/journal
+        state: directory
+        owner: root
+        group: systemd-journal
+        mode: "2755"
+
+    - name: Switch journald to persistent storage
+      # Some minimal systemd packages (e.g. Rocky Linux 10) don't ship
+      # /etc/systemd/journald.conf at all - systemd then falls back to
+      # its compiled-in defaults. lineinfile fails on a missing
+      # destination file without "create: yes"; with create: yes it
+      # creates a minimal one when needed, without treating existing
+      # installations (which already have the file) any differently.
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: "^#?Storage="
+        line: "Storage=persistent"
+        create: yes
+      notify: restart journald
+
+    # ------------------------------------------------------------------
+    # 5. SSH key distribution
+    # ------------------------------------------------------------------
+    - name: Create ~/.ssh for admin/service
+      loop: [admin, service]
+      ansible.builtin.file:
+        path: "/home/{{ item }}/.ssh"
+        state: directory
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: "0700"
+
+    # One task, one list: afterwards exactly the operator keys can log in as
+    # either user. "exclusive" removes every other key, so a key that is
+    # dropped from the inventory (a person who left, a retired key) loses its
+    # access with the next run instead of staying on the host forever.
+    - name: Install exactly the operator keys for admin and service
+      loop: [admin, service]
+      ansible.posix.authorized_key:
+        user: "{{ item }}"
+        key: "{{ operator_public_keys | join('\n') }}"
+        exclusive: true
+        state: present
+
+    # ------------------------------------------------------------------
+    # 6. Rootless Podman: linger + kernel tuning
+    # ------------------------------------------------------------------
+    - name: Enable linger for "service" (containers survive logout)
+      ansible.builtin.command: loginctl enable-linger service
+      args:
+        creates: /var/lib/systemd/linger/service
+
+    # Caddy runs rootless and binds 80 and 443. Every unprivileged process may
+    # bind the ports from this value upwards, so it stays as high as possible.
+    - name: Allow unprivileged ports from 80 (for rootless Podman)
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-podman-ports.conf
+        content: "net.ipv4.ip_unprivileged_port_start=80\n"
+        mode: "0644"
+      notify: reload sysctl
+
+    # Rootless containers get their resource limits (memory, cpu, pids) from
+    # the cgroup controllers that systemd delegates to the user's own manager.
+    # Some distributions delegate only "pids" by default; the container runtime
+    # then refuses to start every container that carries a memory limit. The
+    # drop-in hands over the controllers the Quadlets use and is identical to
+    # the default where a distribution already delegates them. It takes effect
+    # for user managers started afterwards, so on a host that is already
+    # running it needs a reboot.
+    - name: Create the drop-in directory for the user manager
+      ansible.builtin.file:
+        path: /etc/systemd/system/user@.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Delegate cgroup controllers to the user manager (limits of rootless containers)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/user@.service.d/50-vb-delegate.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Service]
+          Delegate=pids memory cpu cpuset io
+
+    - name: Create ~/.config/containers for "service"
+      ansible.builtin.file:
+        path: /home/service/.config/containers
+        state: directory
+        owner: service
+        group: service
+        mode: "0755"
+
+    - name: Write rootless storage override for "service"
+      # Originally needed because a third-party repo used earlier shipped
+      # a /usr/share/containers/storage.conf that unconditionally set
+      # "runroot" to the root-only path "/run/containers/storage" - that
+      # overrode Podman's own rootless auto-detection and made every
+      # container start fail with "permission denied". That repo is no
+      # longer added (see task 2 above) and the native Podman packages of
+      # the supported distributions aren't affected by this - the
+      # override still stays in place as a cheap, harmless safeguard in
+      # case a package with a similarly hardcoded storage.conf ever shows
+      # up. Fix: our own minimal storage.conf for "service" WITHOUT a
+      # runroot/graphroot line - then Podman's correct rootless default
+      # kicks back in ("$XDG_RUNTIME_DIR/containers" or
+      # "~/.local/share/containers/storage").
+      ansible.builtin.copy:
+        dest: /home/service/.config/containers/storage.conf
+        content: |
+          [storage]
+          driver = "overlay"
+        owner: service
+        group: service
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 7. Reboot NOW (finalizes kernel/Podman/sysctl changes) -
+    # deliberately BEFORE the SSH hardening: the reboot module reconnects
+    # as root after the restart to verify the host is back up. If
+    # PermitRootLogin=no had already been written to disk beforehand, the
+    # freshly started sshd would lock root out immediately and the
+    # module would hang until reboot_timeout on its own reconnect check.
+    # ------------------------------------------------------------------
+    # The marker is written only after the host came back, so an interrupted
+    # first run still reboots on the next run, and a verification re-run
+    # neither reports a change nor restarts the host.
+    - name: Check whether the finalizing reboot already happened
+      ansible.builtin.stat:
+        path: /var/lib/vb-setup-rebooted
+      register: setup_reboot_marker
+
+    - name: Reboot host (finalizes kernel/Podman/systemd changes)
+      when: not setup_reboot_marker.stat.exists
+      block:
+        - ansible.builtin.reboot:
+            reboot_timeout: 600
+        - ansible.builtin.file:
+            path: /var/lib/vb-setup-rebooted
+            state: touch
+            owner: root
+            group: root
+            mode: "0644"
+            modification_time: preserve
+            access_time: preserve
+
+    # ------------------------------------------------------------------
+    # 8. Firewall: only SSH + HTTP/HTTPS (Caddy) left open
+    # ------------------------------------------------------------------
+    - name: Configure firewall (Debian/UFW)
+      when: ansible_os_family == "Debian"
+      block:
+        - community.general.ufw:
+            default: allow
+            direction: outgoing
+        - community.general.ufw:
+            default: deny
+            direction: incoming
+        # SSH is open without a connection rate limit: password and root
+        # login are disabled, so guessing gets an attacker nowhere, while a
+        # limit (ufw "limit" denies an address after six connections in
+        # thirty seconds) locks the operator out of the host as soon as a
+        # script or a few quick logins open several connections. The allow
+        # rule comes first and exists before the firewall is enabled; the
+        # older limit rule is removed afterwards, if a host still has it, so
+        # SSH is never without a rule in between. In check mode the module
+        # reports this deletion as a change even when the rule is already
+        # gone (the real run reports "ok"), so a verification run on a fully
+        # configured host shows exactly this one change.
+        - community.general.ufw:
+            rule: allow
+            port: "22"
+            proto: tcp
+        - community.general.ufw:
+            rule: limit
+            port: "22"
+            proto: tcp
+            delete: true
+        - community.general.ufw:
+            rule: allow
+            port: "{{ item }}"
+            proto: tcp
+          loop: ["80", "443"]
+        - community.general.ufw:
+            state: enabled
+
+    - name: Configure firewall (RedHat/SUSE/firewalld)
+      when: ansible_os_family in ["RedHat", "Suse"]
+      block:
+        - ansible.builtin.systemd:
+            name: firewalld
+            state: started
+            enabled: yes
+        - ansible.builtin.command: firewall-cmd --set-default-zone=public
+          register: firewall_default_zone
+          changed_when: "'ZONE_ALREADY_SET' not in firewall_default_zone.stdout + firewall_default_zone.stderr"
+        # "immediate" applies each change to the running firewall as well, so
+        # no separate reload command (which would report a change on every
+        # run) is needed.
+        - ansible.builtin.firewalld:
+            port: "{{ item }}"
+            permanent: yes
+            immediate: yes
+            state: enabled
+          loop:
+            - 22/tcp
+            - 80/tcp
+            - 443/tcp
+        # The default zone of the RedHat family also lets the web console
+        # (cockpit, port 9090) through. The console is not used here, so the
+        # service is closed even though nothing listens on it today.
+        # dhcpv6-client stays: some providers hand out the IPv6 address
+        # through DHCPv6.
+        - ansible.builtin.firewalld:
+            service: cockpit
+            permanent: yes
+            immediate: yes
+            state: disabled
+
+    # ------------------------------------------------------------------
+    # 9. SSH hardening (after the reboot - locks root out only at the end
+    # of the play via the handler, no more root connection needed from
+    # here)
+    # ------------------------------------------------------------------
+    # The hardening below closes root and password logins for good. Before
+    # that, prove that the operator key really logs in as both users and that
+    # "admin" really has sudo without a password: a wrong or missing key in
+    # the inventory then stops the play while the old way in is still open,
+    # instead of locking everybody out. These checks accept only the public-key
+    # method, so a connection password (-k) cannot make them pass. They also
+    # open a connection of their own (ansible_ssh_args without ControlMaster):
+    # the shared connections of ansible stay open for a minute after a run and
+    # would let an earlier login stand in for the key that is being proven. In
+    # check mode the keys are not installed yet, so on a new host they would fail.
+    - name: Prove that the operator key logs in as admin and as service
+      when: not ansible_check_mode
+      loop: [admin, service]
+      become: false
+      vars:
+        ansible_user: "{{ item }}"
+        ansible_ssh_args: -o ControlMaster=no -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes
+        ansible_ssh_extra_args: -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+      ansible.builtin.ping:
+
+    - name: Prove that admin may use sudo without a password
+      when: not ansible_check_mode
+      become: true
+      vars:
+        ansible_user: admin
+        ansible_ssh_args: -o ControlMaster=no -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes
+        ansible_ssh_extra_args: -o PreferredAuthentications=publickey -o PasswordAuthentication=no
+      ansible.builtin.command: id -u
+      register: admin_sudo_check
+      changed_when: false
+      failed_when: admin_sudo_check.stdout != "0"
+
+    # A drop-in named 00-* is read before every other file in sshd_config.d
+    # and sshd uses the first value it finds for a keyword, so this file also
+    # wins over drop-ins shipped by cloud images. sshd itself validates it
+    # before it replaces the live file.
+    - name: Install SSH hardening drop-in (key-only for every user, no root)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-vb-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          X11Forwarding no
+          MaxAuthTries 3
+          LoginGraceTime 30
+          AllowUsers admin service
+        validate: /usr/sbin/sshd -t -f %s
+      notify: restart sshd
+
+    # Some images ship an /etc/ssh/sshd_config of their own without any
+    # Include line. Where that file exists, sshd reads it alone (on SUSE it
+    # then ignores the vendor default in /usr/etc, including that default's
+    # Include of sshd_config.d), so the drop-in above would never be read. The
+    # include is put at the top because sshd uses the first value it finds.
+    # Where the main file already includes the directory (Debian, RedHat
+    # family) the line matches and nothing changes.
+    - name: Check for a main sshd configuration in /etc
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config
+      register: sshd_main_config
+
+    - name: Make the main sshd configuration read the drop-in directory
+      when: sshd_main_config.stat.exists
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf\s*$'
+        line: Include /etc/ssh/sshd_config.d/*.conf
+        insertbefore: BOF
+        validate: /usr/sbin/sshd -t -f %s
+      notify: restart sshd
+
+    - name: Read the effective sshd configuration
+      ansible.builtin.command: /usr/sbin/sshd -T
+      register: sshd_effective
+      changed_when: false
+      check_mode: false
+
+    # Handlers run at the end of the play, so a failure here stops the play
+    # before sshd is restarted: a configuration that another file overrides is
+    # never activated silently. In check mode the drop-in is not written, so
+    # the effective configuration is still the old one and the check would
+    # always fail on a host that has not been hardened yet.
+    - name: Ensure the hardening is effective
+      when: not ansible_check_mode
+      ansible.builtin.assert:
+        that:
+          - "'permitrootlogin no' in sshd_effective.stdout_lines"
+          - "'passwordauthentication no' in sshd_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in sshd_effective.stdout_lines"
+
+    # Last step, after the key logins were proven: neither account has a
+    # usable password any more. A password that an earlier setup or a person
+    # set is locked, not only ignored by sshd.
+    - name: Lock the passwords of admin and service
+      loop: [admin, service]
+      ansible.builtin.user:
+        name: "{{ item }}"
+        password_lock: true
+
+  handlers:
+    - name: reload sysctl
+      ansible.builtin.command: sysctl --system
+      listen: reload sysctl
+
+    - name: restart sshd
+      ansible.builtin.systemd:
+        name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+        state: restarted
+      listen: restart sshd
+
+    - name: restart journald
+      ansible.builtin.systemd:
+        name: systemd-journald
+        state: restarted
+      listen: restart journald

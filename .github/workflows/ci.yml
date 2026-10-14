@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# A newer push to a pull request cancels the superseded run; runs on main
+# execute one after the other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege by default; a job that needs more says so itself.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: uv pip install --system --require-hashes -r requirements-dev.lock
+      - name: Check code style (Ruff)
+        run: ruff check --output-format github .
+      - name: Check formatting (Ruff)
+        run: ruff format --check .
+
+  tool:
+    name: Typecheck & Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest version the tool promises to support, and the newest.
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv pip install --system --require-hashes -r requirements-dev.lock
+      - name: Typecheck (Pyright, strict)
+        run: pyright
+      # Includes the documentation tests: both languages in step, every link
+      # and anchor resolves, nothing of the old access concept is left.
+      - name: Test with the coverage gate
+        run: pytest --cov
+
+  playbooks:
+    name: Playbook syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: uv pip install --system --require-hashes -r requirements-dev.lock
+      # The versions of the collections the playbooks were run with.
+      - name: Install the Ansible collections
+        run: ansible-galaxy collection install community.general:==11.2.1 ansible.posix:==2.1.0
+      # The templates of the site directory only serve as an inventory and
+      # as the site_dir that deploy.yml insists on.
+      - name: Check the syntax of both playbooks
+        run: |
+          ansible-playbook -i site-template/production/inventory.ini playbooks/setup_vps.yml --syntax-check
+          ansible-playbook -i site-template/production/inventory.ini playbooks/deploy.yml -e site_dir=site-template/production --syntax-check
+
+  security:
+    name: CodeQL Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: python, actions
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: uv pip install --system --require-hashes -r requirements-dev.lock
+      # The lock pins every version, so a published advisory for a pinned
+      # version fails this job. The weekly schedule reports advisories that
+      # appear after the last change. To accept one with a written reason
+      # while no fixed version exists, add `--ignore-vuln <ID>` to the command.
+      - name: Audit the locked dependencies for known vulnerabilities
+        run: pip-audit -r requirements-dev.lock --no-deps --disable-pip --progress-spinner off

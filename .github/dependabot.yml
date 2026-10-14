@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs (see ci.yml); this keeps the pins current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # The init and analyze steps must run the same release, so they are bumped together.
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"

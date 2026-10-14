@@ -1,0 +1,5 @@
+[Unit]
+Description=Internal configuration state for Caddy
+
+[Volume]
+VolumeName=caddy-config

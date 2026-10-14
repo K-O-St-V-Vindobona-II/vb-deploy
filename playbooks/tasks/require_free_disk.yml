@@ -1,0 +1,51 @@
+---
+# A non-production stage mirrors the whole production bucket into its own
+# Garage (README 5.1). On a disk that is too small the first downsync dies
+# half way and leaves a half-filled data directory behind, so refuse before
+# anything is created. Only the first deploy checks: afterwards the mirror
+# itself occupies the space that is no longer free.
+#
+# Needs: app_environment, ansible_user_dir. The optional variable
+# min_free_disk_gb (inventory or -e) sets the required space in GiB: 60 by
+# default, the mirror of the production bucket (about 45 GiB in autumn 2026)
+# plus the system and the database; 0 switches the check off, for throwaway
+# servers that never run a downsync. The default is applied here and not as a
+# play variable, because a play variable would override the inventory.
+
+- name: Look for an existing Garage data directory (non-production only)
+  when: app_environment != 'production'
+  ansible.builtin.stat:
+    path: "{{ ansible_user_dir }}/data/vb/{{ app_environment }}/garage-data"
+  register: garage_data_dir
+
+- name: Read the free disk space of the home file system (first deploy of a non-production stage)
+  when: app_environment != 'production' and not garage_data_dir.stat.exists
+  # Read-only, so it also runs under --check and shows the real value there.
+  check_mode: false
+  changed_when: false
+  ansible.builtin.command:
+    argv:
+      - df
+      - --output=avail
+      - --block-size=1
+      - "{{ ansible_user_dir }}"
+  register: free_disk_result
+
+- name: Require enough free disk space for the production mirror
+  when: app_environment != 'production' and not garage_data_dir.stat.exists
+  vars:
+    gib: 1073741824
+    free_gib: "{{ (free_disk_result.stdout_lines[-1] | trim | int) // gib }}"
+    required_gib: "{{ min_free_disk_gb | default(60) | int }}"
+  ansible.builtin.assert:
+    that:
+      - free_gib | int >= required_gib | int
+    fail_msg: >-
+      Only {{ free_gib }} GiB are free in {{ ansible_user_dir }}, but a
+      non-production stage mirrors the whole production bucket (about 45 GiB
+      in autumn 2026, growing) and needs at least {{ required_gib }} GiB
+      free before the first deploy. Order a larger disk, or use the light
+      downsync (DOWNSYNC_LIGHT=true in vb-api.env.j2) and set
+      min_free_disk_gb=15 under [vps:vars] in the inventory. For a throwaway
+      server that never runs a downsync set min_free_disk_gb=0 (README 5.1).
+    success_msg: "Free disk space: {{ free_gib }} GiB, required: {{ required_gib }} GiB."

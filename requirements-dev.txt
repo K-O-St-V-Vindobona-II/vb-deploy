@@ -1,0 +1,11 @@
+# Direct dependencies of the checks (tool tests, linters, playbook syntax check,
+# vulnerability audit). requirements-dev.lock pins the full set with hashes;
+# regenerate it after a change here:
+#   uv pip compile requirements-dev.txt --universal --python-version 3.10 \
+#     --generate-hashes -o requirements-dev.lock
+ansible-core
+pip-audit
+pyright
+pytest
+pytest-cov
+ruff

@@ -1,0 +1,40 @@
+[Unit]
+Description=ARQ Worker for VB API (Dev)
+After=vb-api-pg.service vb-api-valkey.service
+
+[Container]
+ContainerName=vb-api-worker
+Pod=vb-api.pod
+Image=localhost/vb-api:dev
+AutoUpdate=local
+Exec=arq app.worker.WorkerSettings
+
+# The dev image runs unprivileged Python processes on an unprivileged port, so
+# it needs no capabilities and must not gain any.
+NoNewPrivileges=true
+DropCapability=all
+
+Volume=<path-to-vb-fastapi-vue>/vb-api:/app:Z
+UserNS=keep-id
+Environment=WATCHFILES_FORCE_POLLING=true
+# Keep the interactive shell history out of the bind-mounted source tree: the
+# container's HOME is /app, which is the working tree.
+Environment=HISTFILE=/dev/null
+# The web container's own entrypoint already applies pending migrations on
+# every start - a second container running the same entrypoint concurrently
+# would redundantly (and, with real pending migrations, riskily) race it.
+Environment=SKIP_MIGRATIONS=true
+EnvironmentFile=%h/.env/vb-api.env
+# AWS credentials for the non-prod downsync script/job. No leading "-"
+# here - Quadlet's EnvironmentFile= does not support an "optional if
+# missing" file (unlike plain systemd units), it always resolves to a
+# required `podman run --env-file`. The file is a mandatory copy like
+# every other dev/env/*.example (see the README) and ships with
+# change-me placeholders, which are enough for the container to start;
+# only an actual downsync attempt needs real values.
+EnvironmentFile=%h/.env/vb-api-aws-prod.env
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120

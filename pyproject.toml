@@ -1,0 +1,71 @@
+[project]
+name = "vb-tools"
+version = "1.0.0"
+description = "Operator tooling: unlock the operator key and run the vb-deploy playbooks"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "B", "S", "UP", "SIM", "PT", "C90", "RUF", "ANN",
+    "RET", "ARG", "ERA", "T20", "BLE", "DTZ", "A", "PTH", "FBT", "N", "TRY",
+    "PERF", "C4", "TCH", "SLF", "PL", "EM", "PIE", "FURB", "ISC", "TID",
+]
+ignore = [
+    "PLR2004", # small literal comparisons (exit codes, argument counts) are clearer inline
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 7
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.environ".msg = "The tools take every input from arguments and files, never from the environment."
+"os.getenv".msg = "The tools take every input from arguments and files, never from the environment."
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607", "ANN", "ARG", "FBT", "PLR", "SLF001", "TRY", "EM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = ["error"]
+
+[tool.pyright]
+include = ["vb_tools", "vb"]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+# Values from untyped libraries must not travel through the code as Unknown.
+reportUnknownMemberType = "error"
+reportUnknownVariableType = "error"
+reportUnknownArgumentType = "error"
+
+# Dead code and unreachable code.
+reportUnreachable = "error"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
+reportUnusedFunction = "error"
+reportUnusedClass = "error"
+
+[tool.coverage.run]
+source = ["vb_tools"]
+branch = true
+
+[tool.coverage.report]
+# The statement and branch figures are judged together; the tool is at 100 %,
+# so the floor sits close below it and a slip shows up at once.
+fail_under = 97
+show_missing = true
+exclude_also = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "def __repr__",
+    "raise NotImplementedError",
+    "^\\s*pass$",
+]

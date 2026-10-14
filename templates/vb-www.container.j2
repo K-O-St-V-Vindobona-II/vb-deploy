@@ -1,0 +1,43 @@
+[Unit]
+Description=VB www Public Site ({{ app_environment }})
+
+[Container]
+ContainerName=vb-www
+Pod=vb-www.pod
+Image=ghcr.io/k-o-st-v-vindobona-ii/vb-www:{{ vb_www_image_tag | default('latest') }}
+AutoUpdate=registry
+EnvironmentFile=%h/.env/vb-www.env
+
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+# No capability is added back: the image runs nginx-unprivileged, whose
+# master and worker processes are uid 101 throughout and which listens on
+# port 8080, so there is no privileged port to bind and no user to switch to.
+
+# --- RESOURCE LIMITS ---
+# Ceilings that contain a runaway process instead of letting it starve the
+# other services of this host; they are not reservations.
+PidsLimit=128
+PodmanArgs=--memory=256m
+
+# /run holds the runtime-rendered config.js (see
+# docker/docker-entrypoint.d/40-generate-runtime-config.sh in the app
+# repo); /tmp holds nginx's PID file and request-buffering temp dirs.
+Mount=type=tmpfs,target=/run,tmpfs-mode=1777,tmpfs-size=16m
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777,tmpfs-size=16m
+
+# Startup counts as complete only once the health check passes, so that
+# podman auto-update can detect a broken image and roll back.
+Notify=healthy
+HealthCmd=wget -qO- http://127.0.0.1:8080/ || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=10s
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=60

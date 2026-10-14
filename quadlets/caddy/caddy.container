@@ -1,0 +1,52 @@
+[Unit]
+Description=Caddy Web Server
+After=network-online.target
+
+[Container]
+# Minor-version tag: receives patch releases through auto-update but never
+# jumps to a new minor version unreviewed.
+Image=docker.io/library/caddy:2.11
+AutoUpdate=registry
+ContainerName=caddy
+Network=host
+
+EnvironmentFile=%h/.env/caddy.env
+
+# --- SECURITY HARDENING ---
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=all
+# CAP_NET_BIND_SERVICE for ports 80/443
+AddCapability=CAP_NET_BIND_SERVICE
+
+# Ephemeral directories in RAM
+Mount=type=tmpfs,target=/tmp,tmpfs-mode=1777
+Mount=type=tmpfs,target=/run,tmpfs-mode=1777
+
+# --- VOLUMES ---
+Volume=%E/vb/infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
+# The :Z label lets the container write its certificates and locks here on
+# hosts that enforce SELinux (the directory is otherwise labelled as plain
+# home data, which container processes may not touch); elsewhere it does nothing.
+Volume=%h/.local/share/caddy/caddy_data:/data:Z
+
+# Internal config in a named volume
+Volume=caddy-config.volume:/config
+
+# --- HEALTHCHECK ---
+# Loopback-only listener defined in the Caddyfile (the admin API is disabled).
+Notify=healthy
+HealthCmd=wget -q -O - http://127.0.0.1:2020/ >/dev/null || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

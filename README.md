@@ -6,6 +6,16 @@ The leading handbook for the Vindobona II system (`vindobona2.at`): how it is bu
 
 **Taking over the system?** Start with the one-page [handover sheet](HANDOVER.md).
 
+**Do not be put off by the number of files.** Python, Ansible playbooks, `.j2` templates and Quadlet files look like a lot, but they all serve one purpose: to roll the system out safely and simply. They contain no application logic and no member data; the application itself lives in `vb-api`, `vb-intern` and `vb-www`. What the parts are for:
+
+- `vb` and `vb_tools/` (Python): a thin wrapper that unlocks the operator key and starts Ansible, so that one command does one job instead of a long list of options.
+- `playbooks/` (Ansible): the written-down steps to set up a server (`setup_vps.yml`) and to put configuration and secrets onto it and restart the services (`deploy.yml`).
+- `templates/`, `quadlets/`, `config/` (`.j2` and plain files): the configuration of the containers, the web server and the database, with blanks that are filled from the values in `vb-access`.
+- `site-template/` and `dev/`: blank starting points for a new installation and examples for local development.
+- `tests/`: checks that keep the tool and this documentation correct.
+
+In everyday operation you need three commands: `./vb check` (preview), `./vb deploy` (apply) and `./vb ssh` (log in), see [2.7](#27-the-vb-commands-you-will-need). You read the code only when you want to know exactly what happens: everything the tool does to the server is written down in the playbooks and templates, and `./vb check` shows it beforehand without changing anything.
+
 ## Where do I start?
 
 | I want to... | Read |

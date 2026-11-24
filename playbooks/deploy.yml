@@ -750,12 +750,15 @@
       changed_when: true
 
     - name: "Immediate deploy vb-api: restart pod"
-      # Do NOT restart vb-api.service directly: the container is bound
-      # to vb-api-pod.service via a generated BindsTo= - restarting the
-      # container stops (and removes) the whole pod, but nothing then
-      # starts the pod back up on its own ("Dependency failed",
-      # empirically verified). The pod service itself correctly brings
-      # all its containers back up via Wants=/Before= on restart.
+      # Restarts the whole pod: the pod service brings all its containers
+      # back up (Quadlet gives it a Wants= for each of them), so the
+      # database and Valkey restart along with the new API image.
+      # Restarting only vb-api.service works as well: the pods run with
+      # --exit-policy=continue (see vb-api.pod.j2), so the other
+      # containers and the pod keep running while one container is
+      # replaced. On 2026-11-24 a restart of vb-api.service on production
+      # left the database, Valkey and the job worker running. Without that
+      # option the pod would stop with the container and stay down.
       tags: [never, deploy-api]
       ansible.builtin.systemd:
         scope: user
@@ -772,8 +775,7 @@
       changed_when: true
 
     - name: "Immediate deploy vb-intern: restart pod"
-      # See the comment for vb-api above - pod service instead of
-      # container service.
+      # Restarts the pod, see the comment for vb-api above.
       tags: [never, deploy-intern]
       ansible.builtin.systemd:
         scope: user
@@ -790,8 +792,7 @@
       changed_when: true
 
     - name: "Immediate deploy vb-www: restart pod"
-      # See the comment for vb-api above - pod service instead of
-      # container service.
+      # Restarts the pod, see the comment for vb-api above.
       tags: [never, deploy-www]
       ansible.builtin.systemd:
         scope: user

@@ -24,11 +24,58 @@ INTERRUPTED = 130
 FAILED = 1
 
 
+STAGE_HELP = "name of the stage, e.g. production"
+PASSED_ON_HELP = "go unchanged to ansible-playbook (see examples)"
+
+PLAYBOOK_COMMANDS = {
+    "setup": (
+        "set up or verify the server (system, users, SSH, firewall)",
+        """\
+examples:
+  ./vb setup production
+      first setup of a new server, or check its base configuration again
+  ./vb setup production -v
+      the same with more output from Ansible
+
+To see beforehand what would change, use ./vb check production.""",
+    ),
+    "deploy": (
+        "sync secrets and configuration and (re)start the services",
+        """\
+examples:
+  ./vb deploy production
+      sync secrets, Caddyfile, Quadlets and timers, restart what changed
+  ./vb deploy production --tags deploy-api
+      only fetch the newest vb-api image now instead of waiting for the
+      nightly automatic update, and restart the vb-api pod (API, job worker,
+      database and Valkey, on other stages than production also Garage: a
+      short interruption); nothing else is synced. The same for the other
+      services: --tags deploy-intern, --tags deploy-www
+  ./vb deploy production -e vb_api_image_tag=<full-commit-sha>
+      run this image version instead of the newest one (roll back, see
+      README 2.3); it stays until the next ./vb deploy without -e. Also
+      vb_intern_image_tag and vb_www_image_tag
+  ./vb deploy production --check --diff
+      show what this deploy would change, change nothing""",
+    ),
+    "check": (
+        "preview both playbooks without changing the server",
+        """\
+examples:
+  ./vb check production
+      runs setup and deploy with --check --diff and changes nothing
+
+Further options go to both runs, e.g. -v for more output.""",
+    ),
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The argument parser; ansible options after the site name are passed on."""
     parser = argparse.ArgumentParser(
         prog="vb",
         description="Unlock the operator key and run the vb-deploy playbooks.",
+        epilog="'./vb <command> -h' explains a command and shows examples.",
     )
     parser.add_argument(
         "--sites-dir",
@@ -40,23 +87,53 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, text in (
-        ("setup", "set up or verify the server (system, users, SSH, firewall)"),
-        ("deploy", "sync secrets and configuration and (re)start the services"),
-        ("check", "preview both playbooks without changing the server"),
-    ):
-        sub = commands.add_parser(name, help=text)
-        sub.add_argument("site", help="stage name, e.g. production")
-        sub.add_argument("ansible_args", nargs=argparse.REMAINDER)
-    ssh = commands.add_parser("ssh", help="open a shell with the operator key")
-    ssh.add_argument("site")
-    ssh.add_argument("user", nargs="?", default="service", choices=["admin", "service"])
+    for name, (summary, examples) in PLAYBOOK_COMMANDS.items():
+        sub = commands.add_parser(
+            name,
+            help=summary,
+            description=summary[0].upper() + summary[1:] + ".",
+            usage=f"vb {name} [-h] stage [ansible-playbook options ...]",
+            epilog=examples,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+        sub.add_argument("site", metavar="stage", help=STAGE_HELP)
+        sub.add_argument(
+            "ansible_args",
+            metavar="ansible-playbook options",
+            nargs=argparse.REMAINDER,
+            help=PASSED_ON_HELP,
+        )
+    ssh = commands.add_parser(
+        "ssh",
+        help="open a shell with the operator key",
+        description=(
+            "Open an interactive shell on the server. It takes no command: "
+            "run commands inside the shell."
+        ),
+    )
+    ssh.add_argument("site", metavar="stage", help=STAGE_HELP)
+    ssh.add_argument(
+        "user",
+        nargs="?",
+        default="service",
+        choices=["admin", "service"],
+        help=(
+            "log in as service (default, runs the containers) or as admin "
+            "(may use sudo, for work on the system)"
+        ),
+    )
     init = commands.add_parser(
         "init", help="create a stage from the vb-deploy template"
     )
-    init.add_argument("site")
+    init.add_argument(
+        "site",
+        metavar="stage",
+        help="name of the new stage; site-template/ needs a folder of that name",
+    )
     rotate = commands.add_parser("rotate-key", help="replace the operator key")
-    rotate.add_argument("site")
+    rotate.add_argument(
+        "site", metavar="stage", help="stage whose operator key is replaced"
+    )
     return parser
 
 

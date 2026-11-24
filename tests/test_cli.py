@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import signal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,10 +15,12 @@ from vb_tools.cli import build_parser, exit_on_termination, main
 from vb_tools.errors import VbError
 
 if TYPE_CHECKING:
+    import argparse
     from collections.abc import Callable
-    from pathlib import Path
 
     from vb_tools.context import Context
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestParser:
@@ -37,6 +41,45 @@ class TestParser:
     def test_a_command_is_required(self) -> None:
         with pytest.raises(SystemExit):
             build_parser().parse_args([])
+
+
+def _command_parsers() -> dict[str, argparse.ArgumentParser]:
+    return build_parser()._subparsers._group_actions[0].choices  # type: ignore[union-attr,return-value]
+
+
+def _deploy_help() -> str:
+    return _command_parsers()["deploy"].format_help()
+
+
+class TestHelp:
+    @pytest.mark.parametrize(
+        "command", ["setup", "deploy", "check", "ssh", "init", "rotate-key"]
+    )
+    def test_every_argument_of_the_command_is_explained(self, command: str) -> None:
+        unexplained = [
+            action.dest
+            for action in _command_parsers()[command]._actions
+            if not action.help
+        ]
+        assert unexplained == []
+
+    def test_the_deploy_help_names_exactly_the_tags_of_the_playbook(self) -> None:
+        playbook = (ROOT / "playbooks" / "deploy.yml").read_text()
+        playbook_tags = set(re.findall(r"tags: \[never, (deploy-[a-z]+)\]", playbook))
+
+        named = set(re.findall(r"--tags (deploy-[a-z]+)", _deploy_help()))
+
+        assert playbook_tags
+        assert named == playbook_tags
+
+    def test_the_image_variables_of_the_deploy_help_exist(self) -> None:
+        templates = "".join(
+            path.read_text() for path in (ROOT / "templates").glob("*.j2")
+        )
+        named = set(re.findall(r"vb_[a-z]+_image_tag", _deploy_help()))
+
+        assert named == {"vb_api_image_tag", "vb_intern_image_tag", "vb_www_image_tag"}
+        assert all(name in templates for name in named)
 
 
 class TestMain:
